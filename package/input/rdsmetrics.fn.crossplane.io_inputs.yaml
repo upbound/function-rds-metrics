@@ -3,10 +3,10 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.14.0
-  name: inputs.template.fn.crossplane.io
+    controller-gen.kubebuilder.io/version: v0.16.0
+  name: inputs.rdsmetrics.fn.crossplane.io
 spec:
-  group: template.fn.crossplane.io
+  group: rdsmetrics.fn.crossplane.io
   names:
     categories:
     - crossplane
@@ -16,7 +16,7 @@ spec:
     singular: input
   scope: Namespaced
   versions:
-  - name: v1beta1
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Input can be used to provide input to this Function.
@@ -28,9 +28,9 @@ spec:
               may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
-          example:
-            description: Example is an example field. Replace it with whatever input
-              you need. :)
+          databaseName:
+            description: DatabaseName is the name of the RDS database instance to
+              fetch metrics for
             type: string
           kind:
             description: |-
@@ -42,8 +42,25 @@ spec:
             type: string
           metadata:
             type: object
+          metrics:
+            description: Metrics is a list of CloudWatch metrics to fetch
+            items:
+              type: string
+            type: array
+          period:
+            description: Period is the granularity of the returned data points in
+              seconds
+            format: int32
+            type: integer
+          region:
+            description: Region is the AWS region where the RDS instance is located
+            type: string
+          target:
+            description: Target where to store the metrics result
+            type: string
         required:
-        - example
+        - databaseName
+        - target
         type: object
     served: true
     storage: true

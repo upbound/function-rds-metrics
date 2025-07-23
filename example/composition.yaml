@@ -1,17 +1,31 @@
 apiVersion: apiextensions.crossplane.io/v1
 kind: Composition
 metadata:
-  name: function-template-go
+  name: function-rds-metrics
 spec:
   compositeTypeRef:
     apiVersion: example.crossplane.io/v1
     kind: XR
   mode: Pipeline
   pipeline:
-  - step: run-the-template
+  - step: fetch-metrics
     functionRef:
-      name: function-template-go
+      name: function-rds-metrics
     input:
-      apiVersion: template.fn.crossplane.io/v1beta1
+      apiVersion: rdsmetrics.fn.crossplane.io/v1beta1
       kind: Input
-      example: "Hello world"
+      databaseName: "database-1"
+      region: "us-east-1"
+      metrics:
+      - "CPUCreditUsage"
+      - "CPUUtilization"
+      - "DatabaseConnections"
+      - "DBLoad"
+      period: 10800
+      target: "status.metricResults"
+    credentials:
+      - name: aws-creds
+        source: Secret
+        secretRef:
+          namespace: crossplane-system
+          name: aws-creds

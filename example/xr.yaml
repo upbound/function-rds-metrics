@@ -4,3 +4,4 @@ kind: XR
 metadata:
   name: example-xr
 spec: {}
+status: {}
