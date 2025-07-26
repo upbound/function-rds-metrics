@@ -1,0 +1,10 @@
+apiVersion: example.crossplane.io/v1
+kind: XR
+metadata:
+  name: test-context-functionality
+spec:
+  databaseName: "context-test-db"
+  region: "us-east-1"
+status:
+  # Test that the function can write to existing status
+  existingField: "should-be-preserved"

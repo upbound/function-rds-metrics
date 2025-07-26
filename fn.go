@@ -19,6 +19,8 @@ import (
 	"github.com/crossplane/function-sdk-go/resource"
 	"github.com/crossplane/function-sdk-go/response"
 	"github.com/cwilhit/function-rds-metrics/input/v1beta1"
+	"google.golang.org/protobuf/types/known/structpb"
+	"gopkg.in/ini.v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -150,10 +152,20 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 
 	metricsObj.Object = metricsMap
 
+	// Write metrics to XR status
 	err = f.putMetricsResultToStatus(req, rsp, in, rdsMetrics)
 	if err != nil {
 		response.ConditionFalse(rsp, "FunctionSuccess", "SerializationError").
 			WithMessage(fmt.Sprintf("Failed to put metrics result to status: %v", err)).
+			TargetCompositeAndClaim()
+		return rsp, nil
+	}
+
+	// Write metrics to pipeline context for subsequent functions (e.g., function-claude)
+	err = f.writeMetricsToContext(rsp, rdsMetrics)
+	if err != nil {
+		response.ConditionFalse(rsp, "FunctionSuccess", "ContextError").
+			WithMessage(fmt.Sprintf("Failed to write metrics to pipeline context: %v", err)).
 			TargetCompositeAndClaim()
 		return rsp, nil
 	}
@@ -296,14 +308,45 @@ func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
 	if credsData, ok := rawCreds["aws-creds"]; ok {
 		credsMap := credsData.GetCredentialData().GetData()
 		awsCreds = make(map[string]string)
-		for k, v := range credsMap {
-			awsCreds[k] = string(v)
+		
+		// Check if we have direct access-key-id and secret-access-key fields
+		if accessKey, hasAccessKey := credsMap["access-key-id"]; hasAccessKey {
+			if secretKey, hasSecretKey := credsMap["secret-access-key"]; hasSecretKey {
+				awsCreds["access-key-id"] = string(accessKey)
+				awsCreds["secret-access-key"] = string(secretKey)
+				return awsCreds, nil
+			}
 		}
+		
+		// Otherwise, try to parse credentials file in INI format
+		if credentialsFile, hasCredentialsFile := credsMap["credentials"]; hasCredentialsFile {
+			cfg, err := ini.Load(credentialsFile)
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to parse credentials file")
+			}
+			
+			// Get default section
+			defaultSection := cfg.Section("default")
+			if defaultSection == nil {
+				return nil, errors.New("no [default] section found in credentials file")
+			}
+			
+			accessKeyID := defaultSection.Key("aws_access_key_id").String()
+			secretAccessKey := defaultSection.Key("aws_secret_access_key").String()
+			
+			if accessKeyID == "" || secretAccessKey == "" {
+				return nil, errors.New("aws_access_key_id or aws_secret_access_key not found in credentials file")
+			}
+			
+			awsCreds["access-key-id"] = accessKeyID
+			awsCreds["secret-access-key"] = secretAccessKey
+			return awsCreds, nil
+		}
+		
+		return nil, errors.New("neither direct credentials nor credentials file found")
 	} else {
 		return nil, errors.New("failed to get aws-creds credentials")
 	}
-
-	return awsCreds, nil
 }
 
 // parseInputAndCredentials parses the input and gets the credentials.
@@ -339,6 +382,43 @@ func (f *Function) preserveContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFu
 		rsp.Context = existingContext
 		f.log.Info("Preserved existing context in response")
 	}
+}
+
+// writeMetricsToContext writes the RDS metrics to the pipeline context for subsequent functions
+func (f *Function) writeMetricsToContext(rsp *fnv1.RunFunctionResponse, metrics *RDSMetrics) error {
+	// Initialize context if it doesn't exist
+	if rsp.Context == nil {
+		rsp.Context = &structpb.Struct{Fields: make(map[string]*structpb.Value)}
+	}
+	
+	// Ensure Fields map is initialized
+	if rsp.Context.Fields == nil {
+		rsp.Context.Fields = make(map[string]*structpb.Value)
+	}
+
+	// Create a structured context entry for RDS metrics
+	contextData := map[string]interface{}{
+		"rdsMetrics": metrics,
+		"timestamp": time.Now().Format(time.RFC3339),
+		"source":    "function-rds-metrics",
+	}
+
+	// Convert context data to structpb.Value
+	contextJSON, err := json.Marshal(contextData)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal context data to JSON")
+	}
+
+	// Store metrics in pipeline context with a well-known key
+	rsp.Context.Fields["rds-metrics"] = &structpb.Value{
+		Kind: &structpb.Value_StringValue{StringValue: string(contextJSON)},
+	}
+
+	f.log.Info("Successfully wrote RDS metrics to pipeline context", 
+		"database", metrics.DatabaseName, 
+		"metricsCount", len(metrics.Metrics))
+
+	return nil
 }
 
 // getAWSConfig creates AWS configuration from the provided credentials

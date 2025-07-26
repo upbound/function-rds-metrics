@@ -1,0 +1,10 @@
+apiVersion: example.crossplane.io/v1
+kind: XR
+metadata:
+  name: test-custom-metrics
+spec:
+  databaseName: "prod-database-1"
+  region: "us-west-2"
+  metricsConfig:
+    customMetrics: true
+    period: 300

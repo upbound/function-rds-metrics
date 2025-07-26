@@ -1,7 +1,7 @@
 apiVersion: example.crossplane.io/v1
 kind: XR
 metadata:
-  name: example-rds-metrics-test
+  name: test-rds-metrics
 spec:
-  databaseName: "example-rds-instance"
+  databaseName: "test-rds-instance"
   region: "us-east-1"

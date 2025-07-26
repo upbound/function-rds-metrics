@@ -1,20 +1,20 @@
 apiVersion: apiextensions.crossplane.io/v1
 kind: Composition
 metadata:
-  name: function-rds-metrics
+  name: function-rds-metrics-basic
 spec:
   compositeTypeRef:
     apiVersion: example.crossplane.io/v1
     kind: XR
   mode: Pipeline
   pipeline:
-  - step: fetch-metrics
+  - step: fetch-rds-metrics
     functionRef:
       name: function-rds-metrics
     input:
       apiVersion: rdsmetrics.fn.crossplane.io/v1beta1
       kind: Input
-      databaseName: "example-rds-instance"
+      databaseName: "test-rds-instance"
       region: "us-east-1"
       target: "status.rdsMetrics"
     credentials:
