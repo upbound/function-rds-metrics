@@ -17,7 +17,13 @@ type Input struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// DatabaseName is the name of the RDS database instance to fetch metrics for
-	DatabaseName string `json:"databaseName"`
+	// +optional
+	DatabaseName string `json:"databaseName,omitempty"`
+
+	// DatabaseNameRef is a reference to retrieve the database name (e.g., from status or context)
+	// Overrides DatabaseName field if used
+	// +optional
+	DatabaseNameRef *string `json:"databaseNameRef,omitempty"`
 
 	// Region is the AWS region where the RDS instance is located
 	Region string `json:"region,omitempty"`
