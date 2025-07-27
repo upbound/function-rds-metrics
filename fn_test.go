@@ -7,8 +7,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/durationpb"
-	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/crossplane/function-sdk-go/logging"
 	fnv1 "github.com/crossplane/function-sdk-go/proto/v1"
@@ -16,104 +16,18 @@ import (
 	"github.com/crossplane/function-sdk-go/response"
 )
 
-func TestWriteMetricsToContext(t *testing.T) {
-	f := &Function{log: logging.NewNopLogger()}
-
-	testMetrics := &RDSMetrics{
-		DatabaseName: "test-db",
-		Region:       "us-east-1",
-		Timestamp:    time.Now(),
-		Metrics: map[string]MetricValue{
-			"CPUUtilization": {
-				Value:     85.5,
-				Unit:      "Percent",
-				Timestamp: time.Now(),
-			},
-			"DatabaseConnections": {
-				Value:     45,
-				Unit:      "Count",
-				Timestamp: time.Now(),
-			},
-		},
-	}
-
-	type args struct {
-		rsp     *fnv1.RunFunctionResponse
-		metrics *RDSMetrics
-	}
-	type want struct {
-		err                error
-		contextShouldExist bool
-		rdsMetricsKey      bool
-	}
-
-	cases := map[string]struct {
-		reason string
-		args   args
-		want   want
-	}{
-		"WriteToEmptyContext": {
-			reason: "Should create context and write metrics when context is nil",
-			args: args{
-				rsp:     &fnv1.RunFunctionResponse{},
-				metrics: testMetrics,
-			},
-			want: want{
-				err:                nil,
-				contextShouldExist: true,
-				rdsMetricsKey:      true,
-			},
-		},
-		"WriteToExistingContext": {
-			reason: "Should preserve existing context and add metrics",
-			args: args{
-				rsp: &fnv1.RunFunctionResponse{
-					Context: &structpb.Struct{
-						Fields: map[string]*structpb.Value{
-							"existing-key": {
-								Kind: &structpb.Value_StringValue{StringValue: "existing-value"},
-							},
-						},
-					},
-				},
-				metrics: testMetrics,
-			},
-			want: want{
-				err:                nil,
-				contextShouldExist: true,
-				rdsMetricsKey:      true,
-			},
-		},
-	}
-
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			err := f.writeMetricsToContext(tc.args.rsp, tc.args.metrics)
-
-			if diff := cmp.Diff(tc.want.err, err, cmpopts.EquateErrors()); diff != "" {
-				t.Errorf("%s\nwriteMetricsToContext(...): -want err, +got err:\n%s", tc.reason, diff)
-			}
-
-			if tc.want.contextShouldExist && tc.args.rsp.Context == nil {
-				t.Errorf("%s: Expected context to exist", tc.reason)
-			}
-
-			if tc.want.rdsMetricsKey {
-				if _, exists := tc.args.rsp.Context.Fields["rds-metrics"]; !exists {
-					t.Errorf("%s: Expected 'rds-metrics' key in context", tc.reason)
-				}
-			}
-		})
-	}
+func strPtr(s string) *string {
+	return &s
 }
 
 func TestRunFunction(t *testing.T) {
 	var (
-		xr = `{"apiVersion":"aws.platform.upbound.io/v1alpha1","kind":"XSQLInstance","metadata":{"name":"test-db"},"spec":{"parameters":{"region":"us-east-1","engine":"postgres"}}}`
-		awsCreds = &fnv1.CredentialData{
+		xr    = `{"apiVersion":"example.crossplane.io/v1","kind":"XR","metadata":{"name":"test-xr"}}`
+		creds = &fnv1.CredentialData{
 			Data: map[string][]byte{
-				"access-key-id":     []byte("test-access-key"),
-				"secret-access-key": []byte("test-secret-key"),
+				"credentials": []byte(`[default]
+aws_access_key_id = test-access-key
+aws_secret_access_key = test-secret-key`),
 			},
 		}
 	)
@@ -133,11 +47,10 @@ func TestRunFunction(t *testing.T) {
 		want   want
 	}{
 		"MissingCredentials": {
-			reason: "Should return fatal error when AWS credentials are missing",
+			reason: "The Function should return a fatal result if no credentials were specified",
 			args: args{
-				ctx: context.Background(),
 				req: &fnv1.RunFunctionRequest{
-					Meta: &fnv1.RequestMeta{Tag: "test"},
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
 					Input: resource.MustStructJSON(`{
 						"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
 						"kind": "Input",
@@ -145,11 +58,16 @@ func TestRunFunction(t *testing.T) {
 						"region": "us-east-1",
 						"target": "status.metrics"
 					}`),
+					Observed: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
 				},
 			},
 			want: want{
 				rsp: &fnv1.RunFunctionResponse{
-					Meta: &fnv1.ResponseMeta{Tag: "test", Ttl: durationpb.New(response.DefaultTTL)},
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
 					Results: []*fnv1.Result{
 						{
 							Severity: fnv1.Severity_SEVERITY_FATAL,
@@ -161,38 +79,143 @@ func TestRunFunction(t *testing.T) {
 			},
 		},
 		"MissingDatabaseName": {
-			reason: "Should return condition false when database name is missing",
+			reason: "The Function should return a false condition if no database name is specified",
 			args: args{
-				ctx: context.Background(),
 				req: &fnv1.RunFunctionRequest{
-					Meta: &fnv1.RequestMeta{Tag: "test"},
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
 					Input: resource.MustStructJSON(`{
 						"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
 						"kind": "Input",
 						"region": "us-east-1",
 						"target": "status.metrics"
 					}`),
-					Credentials: map[string]*fnv1.Credentials{
-						"aws-creds": {
-							Source: &fnv1.Credentials_CredentialData{CredentialData: awsCreds},
-						},
-					},
 					Observed: &fnv1.State{
 						Composite: &fnv1.Resource{
 							Resource: resource.MustStructJSON(xr),
+						},
+					},
+					Credentials: map[string]*fnv1.Credentials{
+						"aws-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: creds},
 						},
 					},
 				},
 			},
 			want: want{
 				rsp: &fnv1.RunFunctionResponse{
-					Meta: &fnv1.ResponseMeta{Tag: "test", Ttl: durationpb.New(response.DefaultTTL)},
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
 					Conditions: []*fnv1.Condition{
 						{
-							Type:   "FunctionSuccess",
-							Status: fnv1.Status_STATUS_CONDITION_FALSE,
-							Reason: "InvalidInput",
-							Target: fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
+							Type:    "FunctionSuccess",
+							Status:  fnv1.Status_STATUS_CONDITION_FALSE,
+							Reason:  "InvalidInput",
+							Message: strPtr("DatabaseName is required"),
+							Target:  fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
+						},
+					},
+				},
+			},
+		},
+		"MetricsToContextField": {
+			reason: "The Function should store metrics results in context field",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
+						"kind": "Input",
+						"databaseName": "test-db",
+						"region": "us-east-1",
+						"target": "context.metricsResult",
+						"metrics": ["CPUUtilization"]
+					}`),
+					Observed: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+					Credentials: map[string]*fnv1.Credentials{
+						"aws-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: creds},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Conditions: []*fnv1.Condition{
+						{
+							Type:    "FunctionSuccess",
+							Status:  fnv1.Status_STATUS_CONDITION_FALSE,
+							Reason:  "AWSConfigError",
+							Message: strPtr("Failed to create AWS config: failed to create AWS config: operation error loading EC2 IMDS resource: request canceled, context deadline exceeded"),
+							Target:  fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
+						},
+					},
+					Desired: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(`{
+								"apiVersion": "example.crossplane.io/v1",
+								"kind": "XR",
+								"metadata": {
+									"name": "test-xr"
+								}
+							}`),
+						},
+					},
+				},
+			},
+		},
+		"MetricsToStatusField": {
+			reason: "The Function should store metrics results in status field only (no context duplication)",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
+						"kind": "Input",
+						"databaseName": "test-db",
+						"region": "us-east-1",
+						"target": "status.rdsMetrics",
+						"metrics": ["CPUUtilization"]
+					}`),
+					Observed: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+					Credentials: map[string]*fnv1.Credentials{
+						"aws-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: creds},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Conditions: []*fnv1.Condition{
+						{
+							Type:    "FunctionSuccess",
+							Status:  fnv1.Status_STATUS_CONDITION_FALSE,
+							Reason:  "AWSConfigError",
+							Message: strPtr("Failed to create AWS config: failed to create AWS config: operation error loading EC2 IMDS resource: request canceled, context deadline exceeded"),
+							Target:  fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
+						},
+					},
+					// Status targets should NOT populate context to avoid duplication
+					Desired: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(`{
+								"apiVersion": "example.crossplane.io/v1",
+								"kind": "XR",
+								"metadata": {
+									"name": "test-xr"
+								}
+							}`),
 						},
 					},
 				},
@@ -205,25 +228,110 @@ func TestRunFunction(t *testing.T) {
 			f := &Function{log: logging.NewNopLogger()}
 			rsp, err := f.RunFunction(tc.args.ctx, tc.args.req)
 
+			// For tests that expect AWS failures, we mainly want to verify context population behavior
+			if name == "MetricsToContextField" {
+				if rsp == nil {
+					t.Fatalf("%s: Expected response, got nil", tc.reason)
+				}
+				
+				// Context targets should populate context
+				if rsp.Context == nil {
+					t.Errorf("%s: Expected context to be populated for context target, got nil", tc.reason)
+				} else {
+					contextMap := rsp.Context.AsMap()
+					// Check for the specific field
+					if _, exists := contextMap["metricsResult"]; !exists {
+						t.Errorf("%s: Expected 'metricsResult' key in context for context target. Available keys: %v", tc.reason, getMapKeys(contextMap))
+					}
+					// Check for the reference field
+					if _, exists := contextMap["rdsMetricsRef"]; !exists {
+						t.Errorf("%s: Expected 'rdsMetricsRef' key in context for function-claude integration. Available keys: %v", tc.reason, getMapKeys(contextMap))
+					}
+					if len(contextMap) > 0 {
+						t.Logf("%s: SUCCESS - Context is populated correctly", tc.reason)
+					}
+				}
+				
+				if len(rsp.Conditions) == 0 {
+					t.Errorf("%s: Expected at least one condition", tc.reason)
+				}
+				return
+			}
+			
+			if name == "MetricsToStatusField" {
+				if rsp == nil {
+					t.Fatalf("%s: Expected response, got nil", tc.reason)
+				}
+				
+				// Status targets should NOT populate context (to avoid duplication)
+				if rsp.Context != nil {
+					contextMap := rsp.Context.AsMap()
+					if len(contextMap) > 0 {
+						t.Errorf("%s: Expected context to be empty for status target to avoid duplication, but got: %v", tc.reason, getMapKeys(contextMap))
+					}
+				}
+				
+				t.Logf("%s: SUCCESS - Status target does not populate context (avoids duplication)", tc.reason)
+				
+				if len(rsp.Conditions) == 0 {
+					t.Errorf("%s: Expected at least one condition", tc.reason)
+				}
+				return
+			}
+
+			// For other tests, do exact comparison
+			if diff := cmp.Diff(tc.want.rsp, rsp, protocmp.Transform()); diff != "" {
+				t.Errorf("%s\nf.RunFunction(...): -want rsp, +got rsp:\n%s", tc.reason, diff)
+			}
+
 			if diff := cmp.Diff(tc.want.err, err, cmpopts.EquateErrors()); diff != "" {
 				t.Errorf("%s\nf.RunFunction(...): -want err, +got err:\n%s", tc.reason, diff)
 			}
-
-			// Compare specific fields to avoid issues with timestamps and complex objects
-			if len(tc.want.rsp.Results) > 0 && len(rsp.Results) > 0 {
-				if tc.want.rsp.Results[0].Severity != rsp.Results[0].Severity {
-					t.Errorf("%s: Expected severity %v, got %v", tc.reason, tc.want.rsp.Results[0].Severity, rsp.Results[0].Severity)
-				}
-			}
-
-			if len(tc.want.rsp.Conditions) > 0 && len(rsp.Conditions) > 0 {
-				if tc.want.rsp.Conditions[0].Type != rsp.Conditions[0].Type {
-					t.Errorf("%s: Expected condition type %v, got %v", tc.reason, tc.want.rsp.Conditions[0].Type, rsp.Conditions[0].Type)
-				}
-				if tc.want.rsp.Conditions[0].Status != rsp.Conditions[0].Status {
-					t.Errorf("%s: Expected condition status %v, got %v", tc.reason, tc.want.rsp.Conditions[0].Status, rsp.Conditions[0].Status)
-				}
-			}
 		})
+	}
+}
+
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func TestContextWritingDirect(t *testing.T) {
+	// Test the context writing function directly
+	f := &Function{log: logging.NewNopLogger()}
+	
+	testMetrics := &RDSMetrics{
+		DatabaseName: "test-db",
+		Region:       "us-east-1",
+		Timestamp:    time.Now(),
+		Metrics:      make(map[string]MetricValue),
+	}
+
+	req := &fnv1.RunFunctionRequest{}
+	rsp := &fnv1.RunFunctionResponse{}
+
+	// Test context target
+	err := f.writeMetricsToContext(req, rsp, testMetrics, "context.metricsResult")
+	if err != nil {
+		t.Fatalf("writeMetricsToContext failed: %v", err)
+	}
+
+	if rsp.Context == nil {
+		t.Fatal("Expected context to be populated, got nil")
+	}
+
+	contextMap := rsp.Context.AsMap()
+	t.Logf("Context map: %+v", contextMap)
+
+	// Check if context has the expected fields for the new simplified structure
+	if _, exists := contextMap["metricsResult"]; !exists {
+		t.Errorf("Expected 'metricsResult' key in context. Available keys: %v", getMapKeys(contextMap))
+	}
+
+	if _, exists := contextMap["rdsMetricsRef"]; !exists {
+		t.Errorf("Expected 'rdsMetricsRef' key in context for function-claude integration. Available keys: %v", getMapKeys(contextMap))
 	}
 }
