@@ -14,13 +14,13 @@ spec:
     input:
       apiVersion: rdsmetrics.fn.crossplane.io/v1beta1
       kind: Input
-      databaseName: "context-test-db"
-      region: "us-east-1"
+      databaseName: "test-db-2"
+      region: "us-west-2"
       metrics:
       - "CPUUtilization"
       - "DatabaseConnections"
       - "FreeableMemory"
-      target: "status.metricsResult"
+      target: "context.metricsResult"
     credentials:
       - name: aws-creds
         source: Secret

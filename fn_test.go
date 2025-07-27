@@ -221,7 +221,7 @@ aws_secret_access_key = test-secret-key`),
 			},
 		},
 		"MetricsToStatusField": {
-			reason: "The Function should store metrics results in status field only (no context duplication)",
+			reason: "The Function should store metrics results in status field and populate context for pipeline continuity",
 			args: args{
 				ctx: context.Background(),
 				req: &fnv1.RunFunctionRequest{
@@ -285,12 +285,12 @@ aws_secret_access_key = test-secret-key`),
 				if rsp == nil {
 					t.Fatalf("%s: Expected response, got nil", tc.reason)
 				}
-				
+
 				// Verify context was populated with the resolved database name
-				if rsp.Context == nil {
+				if rsp.GetContext() == nil {
 					t.Errorf("%s: Expected context to be populated for context target, got nil", tc.reason)
 				} else {
-					contextMap := rsp.Context.AsMap()
+					contextMap := rsp.GetContext().AsMap()
 					if metricsResult, exists := contextMap["metricsResult"]; exists {
 						if metricsData, ok := metricsResult.(map[string]interface{}); ok {
 							if dbName, exists := metricsData["databaseName"]; exists {
@@ -311,17 +311,17 @@ aws_secret_access_key = test-secret-key`),
 				}
 				return
 			}
-			
+
 			if name == "MetricsToContextField" {
 				if rsp == nil {
 					t.Fatalf("%s: Expected response, got nil", tc.reason)
 				}
-				
+
 				// Context targets should populate context
-				if rsp.Context == nil {
+				if rsp.GetContext() == nil {
 					t.Errorf("%s: Expected context to be populated for context target, got nil", tc.reason)
 				} else {
-					contextMap := rsp.Context.AsMap()
+					contextMap := rsp.GetContext().AsMap()
 					// Check for the specific field
 					if _, exists := contextMap["metricsResult"]; !exists {
 						t.Errorf("%s: Expected 'metricsResult' key in context for context target. Available keys: %v", tc.reason, getMapKeys(contextMap))
@@ -334,29 +334,36 @@ aws_secret_access_key = test-secret-key`),
 						t.Logf("%s: SUCCESS - Context is populated correctly", tc.reason)
 					}
 				}
-				
-				if len(rsp.Conditions) == 0 {
+
+				if len(rsp.GetConditions()) == 0 {
 					t.Errorf("%s: Expected at least one condition", tc.reason)
 				}
 				return
 			}
-			
+
 			if name == "MetricsToStatusField" {
 				if rsp == nil {
 					t.Fatalf("%s: Expected response, got nil", tc.reason)
 				}
-				
-				// Status targets should NOT populate context (to avoid duplication)
-				if rsp.Context != nil {
-					contextMap := rsp.Context.AsMap()
-					if len(contextMap) > 0 {
-						t.Errorf("%s: Expected context to be empty for status target to avoid duplication, but got: %v", tc.reason, getMapKeys(contextMap))
+
+				// Status targets should ALSO populate context for pipeline continuity
+				if rsp.GetContext() == nil {
+					t.Errorf("%s: Expected context to be populated for pipeline continuity, got nil", tc.reason)
+				} else {
+					contextMap := rsp.GetContext().AsMap()
+					// Should have the metrics data in context using the status field name
+					if _, exists := contextMap["rdsMetrics"]; !exists {
+						t.Errorf("%s: Expected 'rdsMetrics' key in context for pipeline continuity. Available keys: %v", tc.reason, getMapKeys(contextMap))
+					}
+					// Should also have the reference field
+					if _, exists := contextMap["rdsMetricsRef"]; !exists {
+						t.Errorf("%s: Expected 'rdsMetricsRef' key in context for function-claude integration. Available keys: %v", tc.reason, getMapKeys(contextMap))
 					}
 				}
-				
-				t.Logf("%s: SUCCESS - Status target does not populate context (avoids duplication)", tc.reason)
-				
-				if len(rsp.Conditions) == 0 {
+
+				t.Logf("%s: SUCCESS - Status target populates context for pipeline continuity", tc.reason)
+
+				if len(rsp.GetConditions()) == 0 {
 					t.Errorf("%s: Expected at least one condition", tc.reason)
 				}
 				return
@@ -385,7 +392,7 @@ func getMapKeys(m map[string]interface{}) []string {
 func TestContextWritingDirect(t *testing.T) {
 	// Test the context writing function directly
 	f := &Function{log: logging.NewNopLogger()}
-	
+
 	testMetrics := &RDSMetrics{
 		DatabaseName: "test-db",
 		Region:       "us-east-1",
@@ -402,11 +409,11 @@ func TestContextWritingDirect(t *testing.T) {
 		t.Fatalf("writeMetricsToContext failed: %v", err)
 	}
 
-	if rsp.Context == nil {
+	if rsp.GetContext() == nil {
 		t.Fatal("Expected context to be populated, got nil")
 	}
 
-	contextMap := rsp.Context.AsMap()
+	contextMap := rsp.GetContext().AsMap()
 	t.Logf("Context map: %+v", contextMap)
 
 	// Check if context has the expected fields for the new simplified structure

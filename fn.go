@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -12,16 +11,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/cwilhit/function-rds-metrics/input/v1beta1"
+	"google.golang.org/protobuf/types/known/structpb"
+	"gopkg.in/ini.v1"
+
 	"github.com/crossplane/function-sdk-go/errors"
 	"github.com/crossplane/function-sdk-go/logging"
 	fnv1 "github.com/crossplane/function-sdk-go/proto/v1"
 	"github.com/crossplane/function-sdk-go/request"
 	"github.com/crossplane/function-sdk-go/resource"
 	"github.com/crossplane/function-sdk-go/response"
-	"github.com/cwilhit/function-rds-metrics/input/v1beta1"
-	"google.golang.org/protobuf/types/known/structpb"
-	"gopkg.in/ini.v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // Function returns RDS metrics from AWS CloudWatch.
@@ -88,115 +87,17 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 		return rsp, nil
 	}
 
-	// Get AWS configuration
-	awsConfig, err := f.getAWSConfig(ctx, awsCreds, in.Region)
-	if err != nil {
-		// Still write empty metrics to context even when AWS config fails
-		emptyMetrics := &RDSMetrics{
-			DatabaseName: in.DatabaseName,
-			Region:       in.Region,
-			Timestamp:    time.Now(),
-			Metrics:      make(map[string]MetricValue),
-		}
-
-		// Write empty metrics to context for pipeline continuity
-		if writeErr := f.writeMetricsToContext(req, rsp, emptyMetrics, in.Target); writeErr != nil {
-			f.log.Info("Failed to write empty metrics to context", "error", writeErr)
-		}
-
-		response.ConditionFalse(rsp, "FunctionSuccess", "AWSConfigError").
-			WithMessage(fmt.Sprintf("Failed to create AWS config: %v", err)).
-			TargetCompositeAndClaim()
+	// Get AWS configuration and handle failures
+	awsConfig, ok := f.handleAWSConfig(ctx, req, rsp, in, awsCreds)
+	if !ok {
 		return rsp, nil
 	}
 
-	// Create CloudWatch client
-	cwClient := cloudwatch.NewFromConfig(awsConfig)
+	// Fetch and process metrics
+	rdsMetrics := f.fetchAndProcessMetrics(ctx, awsConfig, in)
 
-	// Determine which metrics to fetch
-	metricsToFetch := in.Metrics
-	if len(metricsToFetch) == 0 {
-		metricsToFetch = defaultMetrics
-	}
-
-	// Set default period if not specified
-	period := in.Period
-	if period == 0 {
-		period = 300 // 5 minutes default
-	}
-
-	// Fetch metrics from CloudWatch
-	metricsData, err := f.fetchRDSMetrics(ctx, cwClient, in.DatabaseName, metricsToFetch, period)
-	if err != nil {
-		// Still write empty metrics to context even when CloudWatch fails
-		emptyMetrics := &RDSMetrics{
-			DatabaseName: in.DatabaseName,
-			Region:       awsConfig.Region,
-			Timestamp:    time.Now(),
-			Metrics:      make(map[string]MetricValue),
-		}
-
-		// Write empty metrics to context for pipeline continuity
-		if writeErr := f.writeMetricsToContext(req, rsp, emptyMetrics, in.Target); writeErr != nil {
-			f.log.Info("Failed to write empty metrics to context", "error", writeErr)
-		}
-
-		response.ConditionFalse(rsp, "FunctionSuccess", "CloudWatchError").
-			WithMessage(fmt.Sprintf("Failed to fetch RDS metrics: %v", err)).
-			TargetCompositeAndClaim()
-		return rsp, nil
-	}
-
-	// Create the metrics object
-	rdsMetrics := &RDSMetrics{
-		DatabaseName: in.DatabaseName,
-		Region:       awsConfig.Region,
-		Timestamp:    time.Now(),
-		Metrics:      metricsData,
-	}
-
-	// Convert to unstructured object
-	metricsObj := &unstructured.Unstructured{}
-	metricsObj.SetAPIVersion("rds-metrics.fn.crossplane.io/v1beta1")
-	metricsObj.SetKind("RDSMetrics")
-	metricsObj.SetName(fmt.Sprintf("%s-metrics", in.DatabaseName))
-
-	// Convert metrics to JSON and set as object
-	metricsJSON, err := json.Marshal(rdsMetrics)
-	if err != nil {
-		response.ConditionFalse(rsp, "FunctionSuccess", "SerializationError").
-			WithMessage(fmt.Sprintf("Failed to serialize metrics: %v", err)).
-			TargetCompositeAndClaim()
-		return rsp, nil
-	}
-
-	var metricsMap map[string]interface{}
-	if err := json.Unmarshal(metricsJSON, &metricsMap); err != nil {
-		response.ConditionFalse(rsp, "FunctionSuccess", "SerializationError").
-			WithMessage(fmt.Sprintf("Failed to deserialize metrics: %v", err)).
-			TargetCompositeAndClaim()
-		return rsp, nil
-	}
-
-	metricsObj.Object = metricsMap
-
-	// Write metrics to XR status (only if target starts with "status.")
-	if strings.HasPrefix(in.Target, "status.") {
-		err = f.putMetricsResultToStatus(req, rsp, in, rdsMetrics)
-		if err != nil {
-			response.ConditionFalse(rsp, "FunctionSuccess", "SerializationError").
-				WithMessage(fmt.Sprintf("Failed to put metrics result to status: %v", err)).
-				TargetCompositeAndClaim()
-			return rsp, nil
-		}
-	}
-
-	// Write metrics to pipeline context for subsequent functions (e.g., function-claude)
-	err = f.writeMetricsToContext(req, rsp, rdsMetrics, in.Target)
-	if err != nil {
-		response.ConditionFalse(rsp, "FunctionSuccess", "ContextError").
-			WithMessage(fmt.Sprintf("Failed to write metrics to pipeline context: %v", err)).
-			TargetCompositeAndClaim()
+	// Handle output to status and context
+	if !f.handleOutputs(req, rsp, in, rdsMetrics) {
 		return rsp, nil
 	}
 
@@ -374,9 +275,8 @@ func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
 		}
 
 		return nil, errors.New("neither direct credentials nor credentials file found")
-	} else {
-		return nil, errors.New("failed to get aws-creds credentials")
 	}
+	return nil, errors.New("failed to get aws-creds credentials")
 }
 
 // parseInputAndCredentials parses the input and gets the credentials.
@@ -403,15 +303,81 @@ func (f *Function) parseInputAndCredentials(req *fnv1.RunFunctionRequest, rsp *f
 	return in, awsCreds, nil
 }
 
-// preserveContext ensures the context is preserved in the response
-func (f *Function) preserveContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse) {
-	// Get the existing context from the request
-	existingContext := req.GetContext()
-	if existingContext != nil {
-		// Copy the existing context to the response
-		rsp.Context = existingContext
-		f.log.Info("Preserved existing context in response")
+// handleAWSConfig gets AWS configuration and handles failures with empty metrics fallback
+func (f *Function) handleAWSConfig(ctx context.Context, req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, in *v1beta1.Input, awsCreds map[string]string) (aws.Config, bool) {
+	awsConfig, err := f.getAWSConfig(ctx, awsCreds, in.Region)
+	if err != nil {
+		// Still write empty metrics to context even when AWS config fails
+		emptyMetrics := &RDSMetrics{
+			DatabaseName: in.DatabaseName,
+			Region:       in.Region,
+			Timestamp:    time.Now(),
+			Metrics:      make(map[string]MetricValue),
+		}
+
+		// Write empty metrics to context for pipeline continuity
+		if writeErr := f.writeMetricsToContext(req, rsp, emptyMetrics, in.Target); writeErr != nil {
+			f.log.Info("Failed to write empty metrics to context", "error", writeErr)
+		}
+
+		response.ConditionFalse(rsp, "FunctionSuccess", "AWSConfigError").
+			WithMessage(fmt.Sprintf("Failed to create AWS config: %v", err)).
+			TargetCompositeAndClaim()
+		return aws.Config{}, false
 	}
+	return awsConfig, true
+}
+
+// fetchAndProcessMetrics fetches metrics from CloudWatch and creates RDS metrics object
+func (f *Function) fetchAndProcessMetrics(ctx context.Context, awsConfig aws.Config, in *v1beta1.Input) *RDSMetrics {
+	// Create CloudWatch client
+	cwClient := cloudwatch.NewFromConfig(awsConfig)
+
+	// Determine which metrics to fetch
+	metricsToFetch := in.Metrics
+	if len(metricsToFetch) == 0 {
+		metricsToFetch = defaultMetrics
+	}
+
+	// Set default period if not specified
+	period := in.Period
+	if period == 0 {
+		period = 300 // 5 minutes default
+	}
+
+	// Fetch metrics from CloudWatch
+	metricsData := f.fetchRDSMetrics(ctx, cwClient, in.DatabaseName, metricsToFetch, period)
+
+	// Create the metrics object
+	return &RDSMetrics{
+		DatabaseName: in.DatabaseName,
+		Region:       awsConfig.Region,
+		Timestamp:    time.Now(),
+		Metrics:      metricsData,
+	}
+}
+
+// handleOutputs handles writing metrics to status and/or context
+func (f *Function) handleOutputs(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, in *v1beta1.Input, rdsMetrics *RDSMetrics) bool {
+	// Write metrics to XR status (only if target starts with "status.")
+	if strings.HasPrefix(in.Target, "status.") {
+		if err := f.putMetricsResultToStatus(req, rsp, in, rdsMetrics); err != nil {
+			response.ConditionFalse(rsp, "FunctionSuccess", "SerializationError").
+				WithMessage(fmt.Sprintf("Failed to put metrics result to status: %v", err)).
+				TargetCompositeAndClaim()
+			return false
+		}
+	}
+
+	// Write metrics to pipeline context for subsequent functions (e.g., function-claude)
+	if err := f.writeMetricsToContext(req, rsp, rdsMetrics, in.Target); err != nil {
+		response.ConditionFalse(rsp, "FunctionSuccess", "ContextError").
+			WithMessage(fmt.Sprintf("Failed to write metrics to pipeline context: %v", err)).
+			TargetCompositeAndClaim()
+		return false
+	}
+
+	return true
 }
 
 // convertMetricsToSerializableMap converts RDSMetrics to a serializable map structure
@@ -435,38 +401,6 @@ func convertMetricsToSerializableMap(metrics *RDSMetrics) map[string]interface{}
 	}
 }
 
-// putMetricsResultToContext writes metrics results to context (adapted from msgraph function)
-func putMetricsResultToContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, target string, metrics *RDSMetrics, f *Function) error {
-	contextField := strings.TrimPrefix(target, "context.")
-
-	metricsData := convertMetricsToSerializableMap(metrics)
-
-	data, err := structpb.NewValue(metricsData)
-	if err != nil {
-		return errors.Wrap(err, "cannot convert metrics data to structpb.Value")
-	}
-
-	// Convert existing context into a map[string]interface{} (preserve existing context from response)
-	contextMap := rsp.GetContext().AsMap()
-
-	err = SetNestedKey(contextMap, contextField, data.AsInterface())
-	if err != nil {
-		return errors.Wrap(err, "failed to update context key")
-	}
-
-	f.log.Debug("Updating Composition Pipeline Context", "key", contextField, "data", metricsData)
-
-	// Convert the updated context back into structpb.Struct
-	updatedContext, err := structpb.NewStruct(contextMap)
-	if err != nil {
-		return errors.Wrap(err, "failed to serialize updated context")
-	}
-
-	// Set the updated context
-	rsp.Context = updatedContext
-	return nil
-}
-
 // writeMetricsToContext writes the RDS metrics to the pipeline context for subsequent functions
 func (f *Function) writeMetricsToContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, metrics *RDSMetrics, target string) error {
 	// Convert existing context into a map[string]interface{}
@@ -475,38 +409,41 @@ func (f *Function) writeMetricsToContext(req *fnv1.RunFunctionRequest, rsp *fnv1
 	// Create the clean metrics data structure using helper function
 	rdsMetricsData := convertMetricsToSerializableMap(metrics)
 
-	// Only write to context if target starts with "context."
-	if strings.HasPrefix(target, "context.") {
-		contextField := strings.TrimPrefix(target, "context.")
-		err := SetNestedKey(contextMap, contextField, rdsMetricsData)
-		if err != nil {
-			return errors.Wrapf(err, "failed to set context field %s", contextField)
-		}
-
-		// Also add a simple reference for function-claude integration
-		err = SetNestedKey(contextMap, "rdsMetricsRef", contextField)
-		if err != nil {
-			return errors.Wrap(err, "failed to set rds metrics reference")
-		}
-
-		// Convert the updated context back into structpb.Struct
-		updatedContext, err := structpb.NewStruct(contextMap)
-		if err != nil {
-			return errors.Wrap(err, "failed to serialize updated context")
-		}
-		rsp.Context = updatedContext
-
-		f.log.Info("Successfully wrote RDS metrics to pipeline context",
-			"database", metrics.DatabaseName,
-			"metricsCount", len(metrics.Metrics),
-			"contextField", contextField)
-	} else {
-		// For status targets, don't write to context to avoid duplication
-		f.log.Info("Successfully prepared RDS metrics for status target",
-			"database", metrics.DatabaseName,
-			"metricsCount", len(metrics.Metrics),
-			"target", target)
+	// Always write metrics to context for pipeline continuity
+	// The target determines the field name in context
+	var contextField string
+	switch {
+	case strings.HasPrefix(target, "context."):
+		contextField = strings.TrimPrefix(target, "context.")
+	case strings.HasPrefix(target, "status."):
+		contextField = strings.TrimPrefix(target, "status.")
+	default:
+		contextField = "metricsResult" // fallback
 	}
+
+	err := SetNestedKey(contextMap, contextField, rdsMetricsData)
+	if err != nil {
+		return errors.Wrapf(err, "failed to set context field %s", contextField)
+	}
+
+	// Also add a simple reference for function-claude integration
+	err = SetNestedKey(contextMap, "rdsMetricsRef", contextField)
+	if err != nil {
+		return errors.Wrap(err, "failed to set rds metrics reference")
+	}
+
+	// Convert the updated context back into structpb.Struct
+	updatedContext, err := structpb.NewStruct(contextMap)
+	if err != nil {
+		return errors.Wrap(err, "failed to serialize updated context")
+	}
+	rsp.Context = updatedContext
+
+	f.log.Info("Successfully wrote RDS metrics to pipeline context",
+		"database", metrics.DatabaseName,
+		"metricsCount", len(metrics.Metrics),
+		"contextField", contextField,
+		"target", target)
 
 	return nil
 }
@@ -532,7 +469,7 @@ func (f *Function) getAWSConfig(ctx context.Context, awsCreds map[string]string,
 	// Create AWS config with static credentials
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(region),
-		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(_ context.Context) (aws.Credentials, error) {
 			return aws.Credentials{
 				AccessKeyID:     accessKeyID,
 				SecretAccessKey: secretAccessKey,
@@ -547,7 +484,7 @@ func (f *Function) getAWSConfig(ctx context.Context, awsCreds map[string]string,
 }
 
 // fetchRDSMetrics fetches RDS metrics from CloudWatch
-func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Client, dbName string, metrics []string, period int32) (map[string]MetricValue, error) {
+func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Client, dbName string, metrics []string, period int32) map[string]MetricValue {
 	metricsData := make(map[string]MetricValue)
 	endTime := time.Now()
 	startTime := endTime.Add(-time.Duration(period) * time.Second)
@@ -589,13 +526,14 @@ func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Clien
 
 			// Use Average if available, otherwise try Maximum, then Minimum
 			var value float64
-			if latest.Average != nil {
+			switch {
+			case latest.Average != nil:
 				value = *latest.Average
-			} else if latest.Maximum != nil {
+			case latest.Maximum != nil:
 				value = *latest.Maximum
-			} else if latest.Minimum != nil {
+			case latest.Minimum != nil:
 				value = *latest.Minimum
-			} else {
+			default:
 				f.log.Info("No metric value available for datapoint", "metric", metricName)
 				continue
 			}
@@ -608,7 +546,7 @@ func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Clien
 		}
 	}
 
-	return metricsData, nil
+	return metricsData
 }
 
 // processDatabaseNameRef handles resolving the databaseNameRef reference
@@ -661,7 +599,7 @@ func (f *Function) resolveStringRef(req *fnv1.RunFunctionRequest, ref *string, r
 // resolveStringFromXR resolves a string value from XR (metadata, spec, or status)
 func (f *Function) resolveStringFromXR(req *fnv1.RunFunctionRequest, refKey string) (string, error) {
 	xrField := strings.TrimPrefix(refKey, "xr.")
-	
+
 	// Handle different XR sections
 	switch {
 	case strings.HasPrefix(xrField, "metadata."):

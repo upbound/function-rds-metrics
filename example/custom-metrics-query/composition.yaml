@@ -14,7 +14,7 @@ spec:
     input:
       apiVersion: rdsmetrics.fn.crossplane.io/v1beta1
       kind: Input
-      databaseName: "prod-database-1"
+      databaseName: "test-db1"
       region: "us-west-2"
       metrics:
       - "CPUUtilization"
