@@ -13,6 +13,11 @@ func (in *Input) DeepCopyInto(out *Input) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	if in.DatabaseNameRef != nil {
+		in, out := &in.DatabaseNameRef, &out.DatabaseNameRef
+		*out = new(string)
+		**out = **in
+	}
 	if in.Metrics != nil {
 		in, out := &in.Metrics, &out.Metrics
 		*out = make([]string, len(*in))

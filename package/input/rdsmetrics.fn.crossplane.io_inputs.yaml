@@ -32,6 +32,11 @@ spec:
             description: DatabaseName is the name of the RDS database instance to
               fetch metrics for
             type: string
+          databaseNameRef:
+            description: |-
+              DatabaseNameRef is a reference to retrieve the database name (e.g., from status or context)
+              Overrides DatabaseName field if used
+            type: string
           kind:
             description: |-
               Kind is a string value representing the REST resource this object represents.
@@ -59,7 +64,6 @@ spec:
             description: Target where to store the metrics result
             type: string
         required:
-        - databaseName
         - target
         type: object
     served: true
