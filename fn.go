@@ -93,12 +93,12 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 			Timestamp:    time.Now(),
 			Metrics:      make(map[string]MetricValue),
 		}
-		
+
 		// Write empty metrics to context for pipeline continuity
 		if writeErr := f.writeMetricsToContext(req, rsp, emptyMetrics, in.Target); writeErr != nil {
 			f.log.Info("Failed to write empty metrics to context", "error", writeErr)
 		}
-		
+
 		response.ConditionFalse(rsp, "FunctionSuccess", "AWSConfigError").
 			WithMessage(fmt.Sprintf("Failed to create AWS config: %v", err)).
 			TargetCompositeAndClaim()
@@ -130,12 +130,12 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 			Timestamp:    time.Now(),
 			Metrics:      make(map[string]MetricValue),
 		}
-		
+
 		// Write empty metrics to context for pipeline continuity
 		if writeErr := f.writeMetricsToContext(req, rsp, emptyMetrics, in.Target); writeErr != nil {
 			f.log.Info("Failed to write empty metrics to context", "error", writeErr)
 		}
-		
+
 		response.ConditionFalse(rsp, "FunctionSuccess", "CloudWatchError").
 			WithMessage(fmt.Sprintf("Failed to fetch RDS metrics: %v", err)).
 			TargetCompositeAndClaim()
@@ -333,7 +333,7 @@ func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
 	if credsData, ok := rawCreds["aws-creds"]; ok {
 		credsMap := credsData.GetCredentialData().GetData()
 		awsCreds = make(map[string]string)
-		
+
 		// Check if we have direct access-key-id and secret-access-key fields
 		if accessKey, hasAccessKey := credsMap["access-key-id"]; hasAccessKey {
 			if secretKey, hasSecretKey := credsMap["secret-access-key"]; hasSecretKey {
@@ -342,32 +342,32 @@ func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
 				return awsCreds, nil
 			}
 		}
-		
+
 		// Otherwise, try to parse credentials file in INI format
 		if credentialsFile, hasCredentialsFile := credsMap["credentials"]; hasCredentialsFile {
 			cfg, err := ini.Load(credentialsFile)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to parse credentials file")
 			}
-			
+
 			// Get default section
 			defaultSection := cfg.Section("default")
 			if defaultSection == nil {
 				return nil, errors.New("no [default] section found in credentials file")
 			}
-			
+
 			accessKeyID := defaultSection.Key("aws_access_key_id").String()
 			secretAccessKey := defaultSection.Key("aws_secret_access_key").String()
-			
+
 			if accessKeyID == "" || secretAccessKey == "" {
 				return nil, errors.New("aws_access_key_id or aws_secret_access_key not found in credentials file")
 			}
-			
+
 			awsCreds["access-key-id"] = accessKeyID
 			awsCreds["secret-access-key"] = secretAccessKey
 			return awsCreds, nil
 		}
-		
+
 		return nil, errors.New("neither direct credentials nor credentials file found")
 	} else {
 		return nil, errors.New("failed to get aws-creds credentials")
@@ -409,11 +409,9 @@ func (f *Function) preserveContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFu
 	}
 }
 
-// putMetricsResultToContext writes metrics results to context (adapted from msgraph function)
-func putMetricsResultToContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, target string, metrics *RDSMetrics, f *Function) error {
-	contextField := strings.TrimPrefix(target, "context.")
-	
-	// Convert RDSMetrics to a map that can be serialized
+// convertMetricsToSerializableMap converts RDSMetrics to a serializable map structure
+func convertMetricsToSerializableMap(metrics *RDSMetrics) map[string]interface{} {
+	// Convert metrics to serializable format
 	metricsMap := make(map[string]interface{})
 	for key, value := range metrics.Metrics {
 		metricsMap[key] = map[string]interface{}{
@@ -422,14 +420,22 @@ func putMetricsResultToContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFuncti
 			"timestamp": value.Timestamp.Format(time.RFC3339),
 		}
 	}
-	
-	metricsData := map[string]interface{}{
+
+	// Create the clean metrics data structure
+	return map[string]interface{}{
 		"databaseName": metrics.DatabaseName,
 		"region":       metrics.Region,
 		"timestamp":    metrics.Timestamp.Format(time.RFC3339),
 		"metrics":      metricsMap,
 	}
-	
+}
+
+// putMetricsResultToContext writes metrics results to context (adapted from msgraph function)
+func putMetricsResultToContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, target string, metrics *RDSMetrics, f *Function) error {
+	contextField := strings.TrimPrefix(target, "context.")
+
+	metricsData := convertMetricsToSerializableMap(metrics)
+
 	data, err := structpb.NewValue(metricsData)
 	if err != nil {
 		return errors.Wrap(err, "cannot convert metrics data to structpb.Value")
@@ -460,24 +466,9 @@ func putMetricsResultToContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFuncti
 func (f *Function) writeMetricsToContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, metrics *RDSMetrics, target string) error {
 	// Convert existing context into a map[string]interface{}
 	contextMap := req.GetContext().AsMap()
-	
-	// Convert metrics to serializable format
-	metricsMap := make(map[string]interface{})
-	for key, value := range metrics.Metrics {
-		metricsMap[key] = map[string]interface{}{
-			"value":     value.Value,
-			"unit":      value.Unit,
-			"timestamp": value.Timestamp.Format(time.RFC3339),
-		}
-	}
-	
-	// Create the clean metrics data structure
-	rdsMetricsData := map[string]interface{}{
-		"databaseName": metrics.DatabaseName,
-		"region":       metrics.Region,
-		"timestamp":    metrics.Timestamp.Format(time.RFC3339),
-		"metrics":      metricsMap,
-	}
+
+	// Create the clean metrics data structure using helper function
+	rdsMetricsData := convertMetricsToSerializableMap(metrics)
 
 	// Only write to context if target starts with "context."
 	if strings.HasPrefix(target, "context.") {
@@ -486,28 +477,28 @@ func (f *Function) writeMetricsToContext(req *fnv1.RunFunctionRequest, rsp *fnv1
 		if err != nil {
 			return errors.Wrapf(err, "failed to set context field %s", contextField)
 		}
-		
+
 		// Also add a simple reference for function-claude integration
 		err = SetNestedKey(contextMap, "rdsMetricsRef", contextField)
 		if err != nil {
 			return errors.Wrap(err, "failed to set rds metrics reference")
 		}
-		
+
 		// Convert the updated context back into structpb.Struct
 		updatedContext, err := structpb.NewStruct(contextMap)
 		if err != nil {
 			return errors.Wrap(err, "failed to serialize updated context")
 		}
 		rsp.Context = updatedContext
-		
-		f.log.Info("Successfully wrote RDS metrics to pipeline context", 
-			"database", metrics.DatabaseName, 
+
+		f.log.Info("Successfully wrote RDS metrics to pipeline context",
+			"database", metrics.DatabaseName,
 			"metricsCount", len(metrics.Metrics),
 			"contextField", contextField)
 	} else {
 		// For status targets, don't write to context to avoid duplication
-		f.log.Info("Successfully prepared RDS metrics for status target", 
-			"database", metrics.DatabaseName, 
+		f.log.Info("Successfully prepared RDS metrics for status target",
+			"database", metrics.DatabaseName,
 			"metricsCount", len(metrics.Metrics),
 			"target", target)
 	}
