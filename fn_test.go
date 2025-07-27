@@ -79,7 +79,7 @@ aws_secret_access_key = test-secret-key`),
 			},
 		},
 		"MissingDatabaseName": {
-			reason: "The Function should return a false condition if no database name is specified",
+			reason: "The Function should return a false condition if no database name or databaseNameRef is specified",
 			args: args{
 				req: &fnv1.RunFunctionRequest{
 					Meta: &fnv1.RequestMeta{Tag: "hello"},
@@ -109,7 +109,7 @@ aws_secret_access_key = test-secret-key`),
 							Type:    "FunctionSuccess",
 							Status:  fnv1.Status_STATUS_CONDITION_FALSE,
 							Reason:  "InvalidInput",
-							Message: strPtr("DatabaseName is required"),
+							Message: strPtr("DatabaseName or DatabaseNameRef is required"),
 							Target:  fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
 						},
 					},
@@ -126,6 +126,58 @@ aws_secret_access_key = test-secret-key`),
 						"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
 						"kind": "Input",
 						"databaseName": "test-db",
+						"region": "us-east-1",
+						"target": "context.metricsResult",
+						"metrics": ["CPUUtilization"]
+					}`),
+					Observed: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+					Credentials: map[string]*fnv1.Credentials{
+						"aws-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: creds},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Conditions: []*fnv1.Condition{
+						{
+							Type:    "FunctionSuccess",
+							Status:  fnv1.Status_STATUS_CONDITION_FALSE,
+							Reason:  "AWSConfigError",
+							Message: strPtr("Failed to create AWS config: failed to create AWS config: operation error loading EC2 IMDS resource: request canceled, context deadline exceeded"),
+							Target:  fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
+						},
+					},
+					Desired: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(`{
+								"apiVersion": "example.crossplane.io/v1",
+								"kind": "XR",
+								"metadata": {
+									"name": "test-xr"
+								}
+							}`),
+						},
+					},
+				},
+			},
+		},
+		"DatabaseNameFromRef": {
+			reason: "The Function should resolve database name from XR metadata.name",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
+						"kind": "Input",
+						"databaseNameRef": "xr.metadata.name",
 						"region": "us-east-1",
 						"target": "context.metricsResult",
 						"metrics": ["CPUUtilization"]
@@ -229,6 +281,37 @@ aws_secret_access_key = test-secret-key`),
 			rsp, err := f.RunFunction(tc.args.ctx, tc.args.req)
 
 			// For tests that expect AWS failures, we mainly want to verify context population behavior
+			if name == "DatabaseNameFromRef" {
+				if rsp == nil {
+					t.Fatalf("%s: Expected response, got nil", tc.reason)
+				}
+				
+				// Verify context was populated with the resolved database name
+				if rsp.Context == nil {
+					t.Errorf("%s: Expected context to be populated for context target, got nil", tc.reason)
+				} else {
+					contextMap := rsp.Context.AsMap()
+					if metricsResult, exists := contextMap["metricsResult"]; exists {
+						if metricsData, ok := metricsResult.(map[string]interface{}); ok {
+							if dbName, exists := metricsData["databaseName"]; exists {
+								if dbName == "test-xr" {
+									t.Logf("%s: SUCCESS - Database name reference was resolved correctly from 'xr.metadata.name' to '%s'", tc.reason, dbName)
+								} else {
+									t.Errorf("%s: Expected database name 'test-xr', got '%v'", tc.reason, dbName)
+								}
+							} else {
+								t.Errorf("%s: Expected 'databaseName' field in metrics data", tc.reason)
+							}
+						} else {
+							t.Errorf("%s: Expected metricsResult to be a map", tc.reason)
+						}
+					} else {
+						t.Errorf("%s: Expected 'metricsResult' key in context. Available keys: %v", tc.reason, getMapKeys(contextMap))
+					}
+				}
+				return
+			}
+			
 			if name == "MetricsToContextField" {
 				if rsp == nil {
 					t.Fatalf("%s: Expected response, got nil", tc.reason)

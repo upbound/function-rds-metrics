@@ -75,10 +75,15 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 		return rsp, nil //nolint:nilerr // errors are handled in rsp. We should not error main function and proceed with reconciliation
 	}
 
+	// Resolve database name from reference if provided
+	if !f.processDatabaseNameRef(req, in, rsp) {
+		return rsp, nil
+	}
+
 	// Validate required inputs
 	if in.DatabaseName == "" {
 		response.ConditionFalse(rsp, "FunctionSuccess", "InvalidInput").
-			WithMessage("DatabaseName is required").
+			WithMessage("DatabaseName or DatabaseNameRef is required").
 			TargetCompositeAndClaim()
 		return rsp, nil
 	}
@@ -604,4 +609,161 @@ func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Clien
 	}
 
 	return metricsData, nil
+}
+
+// processDatabaseNameRef handles resolving the databaseNameRef reference
+func (f *Function) processDatabaseNameRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
+	if in.DatabaseNameRef == nil || *in.DatabaseNameRef == "" {
+		return true
+	}
+
+	databaseName, err := f.resolveDatabaseNameRef(req, in.DatabaseNameRef)
+	if err != nil {
+		response.Fatal(rsp, err)
+		return false
+	}
+	in.DatabaseName = databaseName
+	f.log.Info("Resolved DatabaseNameRef to database name", "databaseName", databaseName, "databaseNameRef", *in.DatabaseNameRef)
+	return true
+}
+
+// resolveDatabaseNameRef resolves a database name from a reference in status or context
+func (f *Function) resolveDatabaseNameRef(req *fnv1.RunFunctionRequest, databaseNameRef *string) (string, error) {
+	return f.resolveStringRef(req, databaseNameRef, "databaseNameRef")
+}
+
+// resolveStringRef resolves a string value from a reference in spec, status or context
+func (f *Function) resolveStringRef(req *fnv1.RunFunctionRequest, ref *string, refType string) (string, error) {
+	if ref == nil || *ref == "" {
+		return "", errors.Errorf("empty %s provided", refType)
+	}
+
+	refKey := *ref
+
+	var (
+		result string
+		err    error
+	)
+
+	// Use proper switch statement instead of if-else chain
+	switch {
+	case strings.HasPrefix(refKey, "xr."):
+		result, err = f.resolveStringFromXR(req, refKey)
+	case strings.HasPrefix(refKey, "context."):
+		result, err = f.resolveStringFromContext(req, refKey)
+	default:
+		return "", errors.Errorf("unsupported %s format: %s (supported: xr.metadata.name, xr.spec.field, xr.status.field, context.field)", refType, refKey)
+	}
+
+	return result, err
+}
+
+// resolveStringFromXR resolves a string value from XR (metadata, spec, or status)
+func (f *Function) resolveStringFromXR(req *fnv1.RunFunctionRequest, refKey string) (string, error) {
+	xrField := strings.TrimPrefix(refKey, "xr.")
+	
+	// Handle different XR sections
+	switch {
+	case strings.HasPrefix(xrField, "metadata."):
+		return f.resolveStringFromXRMetadata(req, xrField, refKey)
+	case strings.HasPrefix(xrField, "spec."):
+		return f.resolveStringFromXRSpec(req, xrField, refKey)
+	case strings.HasPrefix(xrField, "status."):
+		return f.resolveStringFromXRStatus(req, xrField, refKey)
+	default:
+		return "", errors.Errorf("unsupported XR field: %s (supported: xr.metadata.name, xr.spec.field, xr.status.field)", refKey)
+	}
+}
+
+// resolveStringFromXRMetadata resolves a string value from XR metadata
+func (f *Function) resolveStringFromXRMetadata(req *fnv1.RunFunctionRequest, xrField, refKey string) (string, error) {
+	_, dxr, err := f.getXRAndStatus(req)
+	if err != nil {
+		return "", errors.Wrap(err, "cannot get XR")
+	}
+
+	metadataField := strings.TrimPrefix(xrField, "metadata.")
+	switch metadataField {
+	case "name":
+		name := dxr.Resource.GetName()
+		if name == "" {
+			return "", errors.Errorf("cannot resolve databaseNameRef: XR metadata.name is empty")
+		}
+		return name, nil
+	default:
+		return "", errors.Errorf("cannot resolve databaseNameRef: unsupported metadata field %s (only 'name' is supported)", refKey)
+	}
+}
+
+// resolveStringFromXRSpec resolves a string value from XR spec
+func (f *Function) resolveStringFromXRSpec(req *fnv1.RunFunctionRequest, xrField, refKey string) (string, error) {
+	_, dxr, err := f.getXRAndStatus(req)
+	if err != nil {
+		return "", errors.Wrap(err, "cannot get XR")
+	}
+
+	xrSpec := make(map[string]interface{})
+	err = dxr.Resource.GetValueInto("spec", &xrSpec)
+	if err != nil {
+		return "", errors.Wrap(err, "cannot get XR spec")
+	}
+
+	specField := strings.TrimPrefix(xrField, "spec.")
+	value, ok := GetNestedKey(xrSpec, specField)
+	if !ok {
+		return "", errors.Errorf("cannot resolve databaseNameRef: %s not found", refKey)
+	}
+	return value, nil
+}
+
+// resolveStringFromXRStatus resolves a string value from XR status
+func (f *Function) resolveStringFromXRStatus(req *fnv1.RunFunctionRequest, xrField, refKey string) (string, error) {
+	xrStatus, _, err := f.getXRAndStatus(req)
+	if err != nil {
+		return "", errors.Wrap(err, "cannot get XR status")
+	}
+
+	statusField := strings.TrimPrefix(xrField, "status.")
+	value, ok := GetNestedKey(xrStatus, statusField)
+	if !ok {
+		return "", errors.Errorf("cannot resolve databaseNameRef: %s not found", refKey)
+	}
+	return value, nil
+}
+
+// resolveStringFromContext resolves a string value from function context
+func (f *Function) resolveStringFromContext(req *fnv1.RunFunctionRequest, refKey string) (string, error) {
+	contextMap := req.GetContext().AsMap()
+	contextField := strings.TrimPrefix(refKey, "context.")
+	value, ok := GetNestedKey(contextMap, contextField)
+	if !ok {
+		return "", errors.Errorf("cannot resolve databaseNameRef: %s not found", refKey)
+	}
+	return value, nil
+}
+
+// GetNestedKey gets a value from a nested key using dot notation
+func GetNestedKey(dataMap map[string]interface{}, key string) (string, bool) {
+	parts, err := ParseNestedKey(key)
+	if err != nil {
+		return "", false
+	}
+
+	current := interface{}(dataMap)
+	for _, part := range parts {
+		if currentMap, ok := current.(map[string]interface{}); ok {
+			if next, exists := currentMap[part]; exists {
+				current = next
+			} else {
+				return "", false
+			}
+		} else {
+			return "", false
+		}
+	}
+
+	if str, ok := current.(string); ok {
+		return str, true
+	}
+	return "", false
 }

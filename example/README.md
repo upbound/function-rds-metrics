@@ -27,12 +27,22 @@ $ crossplane render xr.yaml composition.yaml functions.yaml --function-credentia
 
 ### Custom Metrics Query
 ```shell
-$ crossplane render custom-metrics-query/xr.yaml custom-metrics-query/composition.yaml custom-metrics-query/functions.yaml --function-credentials=secrets/aws-creds.yaml -rc
+$ crossplane render custom-metrics-query/xr.yaml custom-metrics-query/composition.yaml functions.yaml --function-credentials=secrets/aws-creds.yaml -rc
 ```
 
 ### Context Testing
 ```shell  
-$ crossplane render context-testing/xr.yaml context-testing/composition.yaml context-testing/functions.yaml --function-credentials=secrets/aws-creds.yaml -rc
+$ crossplane render context-testing/xr.yaml context-testing/composition.yaml functions.yaml --function-credentials=secrets/aws-creds.yaml -rc
+```
+
+### Dynamic Database Name from XR
+```shell
+$ crossplane render database-ref-from-xr/xr.yaml database-ref-from-xr/composition.yaml functions.yaml --function-credentials=secrets/aws-creds.yaml --include-context
+```
+
+### Basic Metrics Query
+```shell
+$ crossplane render basic-metrics-query/xr.yaml basic-metrics-query/composition.yaml functions.yaml --function-credentials=secrets/aws-creds.yaml
 ```
 
 ## Expected Output
