@@ -129,6 +129,10 @@ func (f *Function) getXRAndStatus(req *fnv1.RunFunctionRequest) (map[string]inte
 	if dxr.Resource.GetKind() == "" {
 		dxr.Resource.SetAPIVersion(oxr.Resource.GetAPIVersion())
 		dxr.Resource.SetKind(oxr.Resource.GetKind())
+	}
+
+	// Always ensure the name is set from observed XR
+	if dxr.Resource.GetName() == "" && oxr.Resource.GetName() != "" {
 		dxr.Resource.SetName(oxr.Resource.GetName())
 	}
 
@@ -615,6 +619,12 @@ func (f *Function) resolveStringFromXR(req *fnv1.RunFunctionRequest, refKey stri
 
 // resolveStringFromXRMetadata resolves a string value from XR metadata
 func (f *Function) resolveStringFromXRMetadata(req *fnv1.RunFunctionRequest, xrField, refKey string) (string, error) {
+	// Get both observed and desired XR
+	oxr, err := request.GetObservedCompositeResource(req)
+	if err != nil {
+		return "", errors.Wrap(err, "cannot get observed composite resource")
+	}
+
 	_, dxr, err := f.getXRAndStatus(req)
 	if err != nil {
 		return "", errors.Wrap(err, "cannot get XR")
@@ -623,9 +633,13 @@ func (f *Function) resolveStringFromXRMetadata(req *fnv1.RunFunctionRequest, xrF
 	metadataField := strings.TrimPrefix(xrField, "metadata.")
 	switch metadataField {
 	case "name":
+		// Try desired XR first, fall back to observed XR
 		name := dxr.Resource.GetName()
 		if name == "" {
-			return "", errors.Errorf("cannot resolve databaseNameRef: XR metadata.name is empty")
+			name = oxr.Resource.GetName()
+		}
+		if name == "" {
+			return "", errors.Errorf("cannot resolve databaseNameRef: XR metadata.name is empty in both observed and desired XR")
 		}
 		return name, nil
 	default:
