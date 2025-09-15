@@ -1,4 +1,4 @@
-module github.com/cwilhit/function-rds-metrics
+module github.com/upbound/function-rds-metrics
 
 go 1.24
 

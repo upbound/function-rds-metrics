@@ -11,7 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
-	"github.com/cwilhit/function-rds-metrics/input/v1beta1"
+	"github.com/upbound/function-rds-metrics/input/v1beta1"
 	"google.golang.org/protobuf/types/known/structpb"
 	"gopkg.in/ini.v1"
 
