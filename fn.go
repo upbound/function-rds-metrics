@@ -249,6 +249,11 @@ func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
 			if secretKey, hasSecretKey := credsMap["secret-access-key"]; hasSecretKey {
 				awsCreds["access-key-id"] = string(accessKey)
 				awsCreds["secret-access-key"] = string(secretKey)
+
+				// Include session token if present (for temporary credentials)
+				if sessionToken, hasSessionToken := credsMap["session-token"]; hasSessionToken {
+					awsCreds["session-token"] = string(sessionToken)
+				}
 				return awsCreds, nil
 			}
 		}
@@ -268,6 +273,7 @@ func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
 
 			accessKeyID := defaultSection.Key("aws_access_key_id").String()
 			secretAccessKey := defaultSection.Key("aws_secret_access_key").String()
+			sessionToken := defaultSection.Key("aws_session_token").String()
 
 			if accessKeyID == "" || secretAccessKey == "" {
 				return nil, errors.New("aws_access_key_id or aws_secret_access_key not found in credentials file")
@@ -275,6 +281,11 @@ func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
 
 			awsCreds["access-key-id"] = accessKeyID
 			awsCreds["secret-access-key"] = secretAccessKey
+
+			// Include session token if present (for temporary credentials)
+			if sessionToken != "" {
+				awsCreds["session-token"] = sessionToken
+			}
 			return awsCreds, nil
 		}
 
@@ -465,6 +476,9 @@ func (f *Function) getAWSConfig(ctx context.Context, awsCreds map[string]string,
 		return aws.Config{}, fmt.Errorf("secret-access-key not found in credentials")
 	}
 
+	// Session token is optional (for temporary credentials)
+	sessionToken, _ := awsCreds["session-token"]
+
 	// Use the region from input, with default fallback
 	if region == "" {
 		region = "us-east-1" // Default region
@@ -477,6 +491,7 @@ func (f *Function) getAWSConfig(ctx context.Context, awsCreds map[string]string,
 			return aws.Credentials{
 				AccessKeyID:     accessKeyID,
 				SecretAccessKey: secretAccessKey,
+				SessionToken:    sessionToken,
 			}, nil
 		})),
 	)
