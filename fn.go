@@ -520,7 +520,7 @@ func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Clien
 			},
 			StartTime: aws.Time(startTime),
 			EndTime:   aws.Time(endTime),
-			Period:    aws.Int32(60),
+			Period:    aws.Int32(period),
 			Statistics: []types.Statistic{
 				types.StatisticAverage,
 				types.StatisticMaximum,
