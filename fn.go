@@ -237,61 +237,86 @@ func (f *Function) putMetricsResultToStatus(req *fnv1.RunFunctionRequest, rsp *f
 }
 
 func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
-	var awsCreds map[string]string
 	rawCreds := req.GetCredentials()
 
-	if credsData, ok := rawCreds["aws-creds"]; ok {
-		credsMap := credsData.GetCredentialData().GetData()
-		awsCreds = make(map[string]string)
-
-		// Check if we have direct access-key-id and secret-access-key fields
-		if accessKey, hasAccessKey := credsMap["access-key-id"]; hasAccessKey {
-			if secretKey, hasSecretKey := credsMap["secret-access-key"]; hasSecretKey {
-				awsCreds["access-key-id"] = string(accessKey)
-				awsCreds["secret-access-key"] = string(secretKey)
-
-				// Include session token if present (for temporary credentials)
-				if sessionToken, hasSessionToken := credsMap["session-token"]; hasSessionToken {
-					awsCreds["session-token"] = string(sessionToken)
-				}
-				return awsCreds, nil
-			}
-		}
-
-		// Otherwise, try to parse credentials file in INI format
-		if credentialsFile, hasCredentialsFile := credsMap["credentials"]; hasCredentialsFile {
-			cfg, err := ini.Load(credentialsFile)
-			if err != nil {
-				return nil, errors.Wrap(err, "failed to parse credentials file")
-			}
-
-			// Get default section
-			defaultSection := cfg.Section("default")
-			if defaultSection == nil {
-				return nil, errors.New("no [default] section found in credentials file")
-			}
-
-			accessKeyID := defaultSection.Key("aws_access_key_id").String()
-			secretAccessKey := defaultSection.Key("aws_secret_access_key").String()
-			sessionToken := defaultSection.Key("aws_session_token").String()
-
-			if accessKeyID == "" || secretAccessKey == "" {
-				return nil, errors.New("aws_access_key_id or aws_secret_access_key not found in credentials file")
-			}
-
-			awsCreds["access-key-id"] = accessKeyID
-			awsCreds["secret-access-key"] = secretAccessKey
-
-			// Include session token if present (for temporary credentials)
-			if sessionToken != "" {
-				awsCreds["session-token"] = sessionToken
-			}
-			return awsCreds, nil
-		}
-
-		return nil, errors.New("neither direct credentials nor credentials file found")
+	credsData, ok := rawCreds["aws-creds"]
+	if !ok {
+		return nil, errors.New("failed to get aws-creds credentials")
 	}
-	return nil, errors.New("failed to get aws-creds credentials")
+
+	credsMap := credsData.GetCredentialData().GetData()
+
+	// Try direct credentials first
+	if creds, err := parseDirectCredentials(credsMap); err == nil {
+		return creds, nil
+	}
+
+	// Otherwise, try credentials file
+	if creds, err := parseCredentialsFile(credsMap); err == nil {
+		return creds, nil
+	}
+
+	return nil, errors.New("neither direct credentials nor credentials file found")
+}
+
+// parseDirectCredentials extracts credentials from direct access-key-id/secret-access-key fields
+func parseDirectCredentials(credsMap map[string][]byte) (map[string]string, error) {
+	accessKey, hasAccessKey := credsMap["access-key-id"]
+	secretKey, hasSecretKey := credsMap["secret-access-key"]
+
+	if !hasAccessKey || !hasSecretKey {
+		return nil, errors.New("access-key-id or secret-access-key not found")
+	}
+
+	awsCreds := map[string]string{
+		"access-key-id":     string(accessKey),
+		"secret-access-key": string(secretKey),
+	}
+
+	// Include session token if present (for temporary credentials)
+	if sessionToken, hasSessionToken := credsMap["session-token"]; hasSessionToken {
+		awsCreds["session-token"] = string(sessionToken)
+	}
+
+	return awsCreds, nil
+}
+
+// parseCredentialsFile extracts credentials from an INI-formatted credentials file
+func parseCredentialsFile(credsMap map[string][]byte) (map[string]string, error) {
+	credentialsFile, hasCredentialsFile := credsMap["credentials"]
+	if !hasCredentialsFile {
+		return nil, errors.New("credentials file not found")
+	}
+
+	cfg, err := ini.Load(credentialsFile)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse credentials file")
+	}
+
+	defaultSection := cfg.Section("default")
+	if defaultSection == nil {
+		return nil, errors.New("no [default] section found in credentials file")
+	}
+
+	accessKeyID := defaultSection.Key("aws_access_key_id").String()
+	secretAccessKey := defaultSection.Key("aws_secret_access_key").String()
+	sessionToken := defaultSection.Key("aws_session_token").String()
+
+	if accessKeyID == "" || secretAccessKey == "" {
+		return nil, errors.New("aws_access_key_id or aws_secret_access_key not found in credentials file")
+	}
+
+	awsCreds := map[string]string{
+		"access-key-id":     accessKeyID,
+		"secret-access-key": secretAccessKey,
+	}
+
+	// Include session token if present (for temporary credentials)
+	if sessionToken != "" {
+		awsCreds["session-token"] = sessionToken
+	}
+
+	return awsCreds, nil
 }
 
 // parseInputAndCredentials parses the input and gets the credentials.
@@ -477,7 +502,7 @@ func (f *Function) getAWSConfig(ctx context.Context, awsCreds map[string]string,
 	}
 
 	// Session token is optional (for temporary credentials)
-	sessionToken, _ := awsCreds["session-token"]
+	sessionToken := awsCreds["session-token"]
 
 	// Use the region from input, with default fallback
 	if region == "" {
