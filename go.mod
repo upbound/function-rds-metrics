@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.40.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.2
 	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.52.5
-	github.com/crossplane/function-sdk-go v0.5.0-rc.0.0.20250715215746-ca27889cd196
+	github.com/crossplane/function-sdk-go v0.5.0
 	github.com/google/go-cmp v0.7.0
 	google.golang.org/protobuf v1.36.10
 	gopkg.in/ini.v1 v1.67.0
