@@ -1,6 +1,6 @@
 module github.com/upbound/function-rds-metrics
 
-go 1.25.0
+go 1.25.5
 
 require (
 	github.com/alecthomas/kong v1.13.0
