@@ -36,6 +36,15 @@ spec:
   
   # Output configuration
   target: "context.metricsResult"         # Where to store metrics (context.* or status.*)
+
+  # Credentials (optional, defaults to the Secret source; see AWS Credentials)
+  identity:
+    source: WebIdentity                   # Secret | IRSA | WebIdentity | PodIdentity
+    webIdentity:
+      roleARN: arn:aws:iam::123456789012:role/rds-metrics-reader
+      tokenConfig:
+        source: Filesystem
+        fsPath: /var/run/secrets/upbound.io/provider/token
 ```
 
 ## Database Name References
@@ -206,6 +215,33 @@ aws_access_key_id = YOUR_ACCESS_KEY
 aws_secret_access_key = YOUR_SECRET_KEY
 ```
 
+The Secret can also hold the keys `access-key-id` and `secret-access-key` (and
+optionally `session-token`) directly.
+
+### Identity sources
+
+Set `identity.source` in the input to use credentials without a long-lived key.
+It works like `spec.credentials` of provider-upjet-aws and the `identity` input of
+function-aws-query:
+
+| Source | Credentials | `aws-creds` block |
+|---|---|---|
+| `Secret` (default) | Static credentials from the Secret above | required |
+| `IRSA` | SDK default chain: the function pod's ServiceAccount role (web identity token file) | not needed |
+| `PodIdentity` | SDK default chain: EKS Pod Identity | not needed |
+| `WebIdentity` | Assumes `webIdentity.roleARN` with a web identity token from a file (`tokenConfig.source: Filesystem`, `fsPath`) or from key `token` of the `aws-creds` block (`tokenConfig.source: Secret`) | only for a Secret token |
+
+`identity.assumeRoleChain` assumes further roles, in order, on top of any source.
+
+On Upbound control planes, `WebIdentity` with the Upbound OIDC token works without
+any secret: set the annotation
+`proidc.cloud-spaces.upbound.io/audience: sts.amazonaws.com` on the function's
+`DeploymentRuntimeConfig` and read the token from
+`/var/run/secrets/upbound.io/provider/token`. The role's trust policy needs
+the subject `mcp:<org>/<control plane>:function:<function name>`.
+
+The identity needs `cloudwatch:GetMetricStatistics`.
+
 ## Development
 
 ### Building the Function
@@ -253,7 +289,11 @@ This function is designed to work in composition pipelines with other functions:
 The function implements robust error handling:
 - **AWS Config Errors**: Returns empty metrics but continues pipeline execution
 - **Missing Database**: Fails fast with clear error messages
-- **CloudWatch API Errors**: Logs errors but attempts to continue with available metrics
+- **CloudWatch API Errors**: Continues with the metrics that could be fetched. If
+  every metric request fails (for example missing permissions or invalid
+  credentials), the `FunctionSuccess` condition is `False` with reason
+  `CloudWatchError`; if only some fail, the function returns a warning. A metric
+  without data points is not an error.
 - **Invalid References**: Provides detailed error messages for debugging
 
 [functions]: https://docs.crossplane.io/latest/concepts/composition-functions

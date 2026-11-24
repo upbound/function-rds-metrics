@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/upbound/function-rds-metrics/input/v1beta1"
@@ -28,6 +27,15 @@ type Function struct {
 	fnv1.UnimplementedFunctionRunnerServiceServer
 
 	log logging.Logger
+
+	// newCloudWatch builds the CloudWatch client. Nil means the real client;
+	// tests set a fake.
+	newCloudWatch func(aws.Config) cloudWatchAPI
+}
+
+// cloudWatchAPI is the part of the CloudWatch client the function uses.
+type cloudWatchAPI interface {
+	GetMetricStatistics(ctx context.Context, params *cloudwatch.GetMetricStatisticsInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricStatisticsOutput, error)
 }
 
 // RDSMetrics represents the metrics data structure
@@ -94,11 +102,27 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 	}
 
 	// Fetch and process metrics
-	rdsMetrics := f.fetchAndProcessMetrics(ctx, awsConfig, in)
+	rdsMetrics, requested, fetchErrs := f.fetchAndProcessMetrics(ctx, awsConfig, in)
 
 	// Handle output to status and context
 	if !f.handleOutputs(req, rsp, in, rdsMetrics) {
 		return rsp, nil
+	}
+
+	// A failed CloudWatch call (bad credentials, missing permission, throttling)
+	// used to look exactly like a database without data points. Report it: every
+	// call failed -> FunctionSuccess=False; some failed -> a warning. The
+	// pipeline continues either way, as before.
+	if len(fetchErrs) > 0 {
+		summary := fmt.Sprintf("%d of %d CloudWatch metric requests for RDS instance %s failed: %v",
+			len(fetchErrs), requested, in.DatabaseName, fetchErrs[0])
+		response.Warning(rsp, errors.New(summary)).TargetCompositeAndClaim()
+		if len(fetchErrs) == requested {
+			response.ConditionFalse(rsp, "FunctionSuccess", "CloudWatchError").
+				WithMessage(summary).
+				TargetCompositeAndClaim()
+			return rsp, nil
+		}
 	}
 
 	response.ConditionTrue(rsp, "FunctionSuccess", "Success").
@@ -236,27 +260,25 @@ func (f *Function) putMetricsResultToStatus(req *fnv1.RunFunctionRequest, rsp *f
 	return nil
 }
 
-func getCreds(req *fnv1.RunFunctionRequest) (map[string]string, error) {
-	rawCreds := req.GetCredentials()
-
-	credsData, ok := rawCreds["aws-creds"]
+// getCreds returns the decoded "aws-creds" credentials block. It is required
+// for the Secret identity source (static credentials) and for a web identity
+// token delivered through it; IRSA, Pod Identity and a token file need none.
+func getCreds(req *fnv1.RunFunctionRequest, in *v1beta1.Input) (map[string][]byte, error) {
+	credsData, ok := req.GetCredentials()["aws-creds"]
 	if !ok {
-		return nil, errors.New("failed to get aws-creds credentials")
+		if needsCredentialsBlock(in) {
+			return nil, errors.New("failed to get aws-creds credentials")
+		}
+		return map[string][]byte{}, nil
 	}
 
 	credsMap := credsData.GetCredentialData().GetData()
-
-	// Try direct credentials first
-	if creds, err := parseDirectCredentials(credsMap); err == nil {
-		return creds, nil
+	if identitySource(in) == v1beta1.IdentitySourceSecret {
+		if _, err := parseStaticCredentials(credsMap); err != nil {
+			return nil, err
+		}
 	}
-
-	// Otherwise, try credentials file
-	if creds, err := parseCredentialsFile(credsMap); err == nil {
-		return creds, nil
-	}
-
-	return nil, errors.New("neither direct credentials nor credentials file found")
+	return credsMap, nil
 }
 
 // parseDirectCredentials extracts credentials from direct access-key-id/secret-access-key fields
@@ -320,7 +342,7 @@ func parseCredentialsFile(credsMap map[string][]byte) (map[string]string, error)
 }
 
 // parseInputAndCredentials parses the input and gets the credentials.
-func (f *Function) parseInputAndCredentials(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse) (*v1beta1.Input, map[string]string, error) {
+func (f *Function) parseInputAndCredentials(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse) (*v1beta1.Input, map[string][]byte, error) {
 	in := &v1beta1.Input{}
 	if err := request.GetInput(req, in); err != nil {
 		response.ConditionFalse(rsp, "FunctionSuccess", "InternalError").
@@ -334,7 +356,7 @@ func (f *Function) parseInputAndCredentials(req *fnv1.RunFunctionRequest, rsp *f
 		return nil, nil, err
 	}
 
-	awsCreds, err := getCreds(req)
+	awsCreds, err := getCreds(req, in)
 	if err != nil {
 		response.Fatal(rsp, err)
 		return nil, nil, err
@@ -344,8 +366,8 @@ func (f *Function) parseInputAndCredentials(req *fnv1.RunFunctionRequest, rsp *f
 }
 
 // handleAWSConfig gets AWS configuration and handles failures with empty metrics fallback
-func (f *Function) handleAWSConfig(ctx context.Context, req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, in *v1beta1.Input, awsCreds map[string]string) (aws.Config, bool) {
-	awsConfig, err := f.getAWSConfig(ctx, awsCreds, in.Region)
+func (f *Function) handleAWSConfig(ctx context.Context, req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, in *v1beta1.Input, awsCreds map[string][]byte) (aws.Config, bool) {
+	awsConfig, err := buildAWSConfig(ctx, awsCreds, in)
 	if err != nil {
 		// Still write empty metrics to context even when AWS config fails
 		emptyMetrics := &RDSMetrics{
@@ -368,10 +390,17 @@ func (f *Function) handleAWSConfig(ctx context.Context, req *fnv1.RunFunctionReq
 	return awsConfig, true
 }
 
-// fetchAndProcessMetrics fetches metrics from CloudWatch and creates RDS metrics object
-func (f *Function) fetchAndProcessMetrics(ctx context.Context, awsConfig aws.Config, in *v1beta1.Input) *RDSMetrics {
+// fetchAndProcessMetrics fetches metrics from CloudWatch and creates the RDS
+// metrics object. It also returns how many metrics were requested and the
+// errors of the requests that failed.
+func (f *Function) fetchAndProcessMetrics(ctx context.Context, awsConfig aws.Config, in *v1beta1.Input) (*RDSMetrics, int, []error) {
 	// Create CloudWatch client
-	cwClient := cloudwatch.NewFromConfig(awsConfig)
+	var cwClient cloudWatchAPI
+	if f.newCloudWatch != nil {
+		cwClient = f.newCloudWatch(awsConfig)
+	} else {
+		cwClient = cloudwatch.NewFromConfig(awsConfig)
+	}
 
 	// Determine which metrics to fetch
 	metricsToFetch := in.Metrics
@@ -386,7 +415,7 @@ func (f *Function) fetchAndProcessMetrics(ctx context.Context, awsConfig aws.Con
 	}
 
 	// Fetch metrics from CloudWatch
-	metricsData := f.fetchRDSMetrics(ctx, cwClient, in.DatabaseName, metricsToFetch, period)
+	metricsData, fetchErrs := f.fetchRDSMetrics(ctx, cwClient, in.DatabaseName, metricsToFetch, period)
 
 	// Create the metrics object
 	return &RDSMetrics{
@@ -394,7 +423,7 @@ func (f *Function) fetchAndProcessMetrics(ctx context.Context, awsConfig aws.Con
 		Region:       awsConfig.Region,
 		Timestamp:    time.Now(),
 		Metrics:      metricsData,
-	}
+	}, len(metricsToFetch), fetchErrs
 }
 
 // handleOutputs handles writing metrics to status and/or context
@@ -488,48 +517,12 @@ func (f *Function) writeMetricsToContext(req *fnv1.RunFunctionRequest, rsp *fnv1
 	return nil
 }
 
-// getAWSConfig creates AWS configuration from the provided credentials
-func (f *Function) getAWSConfig(ctx context.Context, awsCreds map[string]string, region string) (aws.Config, error) {
-	// Extract credentials from the provided map
-	accessKeyID, ok := awsCreds["access-key-id"]
-	if !ok {
-		return aws.Config{}, fmt.Errorf("access-key-id not found in credentials")
-	}
-
-	secretAccessKey, ok := awsCreds["secret-access-key"]
-	if !ok {
-		return aws.Config{}, fmt.Errorf("secret-access-key not found in credentials")
-	}
-
-	// Session token is optional (for temporary credentials)
-	sessionToken := awsCreds["session-token"]
-
-	// Use the region from input, with default fallback
-	if region == "" {
-		region = "us-east-1" // Default region
-	}
-
-	// Create AWS config with static credentials
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(region),
-		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(_ context.Context) (aws.Credentials, error) {
-			return aws.Credentials{
-				AccessKeyID:     accessKeyID,
-				SecretAccessKey: secretAccessKey,
-				SessionToken:    sessionToken,
-			}, nil
-		})),
-	)
-	if err != nil {
-		return aws.Config{}, fmt.Errorf("failed to create AWS config: %w", err)
-	}
-
-	return cfg, nil
-}
-
-// fetchRDSMetrics fetches RDS metrics from CloudWatch
-func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Client, dbName string, metrics []string, period int32) map[string]MetricValue {
+// fetchRDSMetrics fetches RDS metrics from CloudWatch. It returns the metrics
+// that had data points and the errors of the requests that failed. A metric
+// without data points is not an error.
+func (f *Function) fetchRDSMetrics(ctx context.Context, client cloudWatchAPI, dbName string, metrics []string, period int32) (map[string]MetricValue, []error) {
 	metricsData := make(map[string]MetricValue)
+	var fetchErrs []error
 	endTime := time.Now()
 	startTime := endTime.Add(-time.Duration(period) * time.Second)
 
@@ -556,6 +549,7 @@ func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Clien
 		result, err := client.GetMetricStatistics(ctx, input)
 		if err != nil {
 			f.log.Info("Failed to fetch metric", "metric", metricName, "error", err)
+			fetchErrs = append(fetchErrs, errors.Wrapf(err, "metric %s", metricName))
 			continue
 		}
 
@@ -590,7 +584,7 @@ func (f *Function) fetchRDSMetrics(ctx context.Context, client *cloudwatch.Clien
 		}
 	}
 
-	return metricsData
+	return metricsData, fetchErrs
 }
 
 // processDatabaseNameRef handles resolving the databaseNameRef reference
