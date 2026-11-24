@@ -37,14 +37,9 @@ spec:
   # Output configuration
   target: "context.metricsResult"         # Where to store metrics (context.* or status.*)
 
-  # Credentials (optional, defaults to the Secret source; see AWS Credentials)
-  identity:
-    source: WebIdentity                   # Secret | IRSA | WebIdentity | PodIdentity
-    webIdentity:
-      roleARN: arn:aws:iam::123456789012:role/rds-metrics-reader
-      tokenConfig:
-        source: Filesystem
-        fsPath: /var/run/secrets/upbound.io/provider/token
+  # Credentials (optional; without it, the Secret source below is used)
+  # identity:
+  #   source: Secret                      # Secret | IRSA | WebIdentity | PodIdentity
 ```
 
 ## Database Name References
@@ -232,6 +227,19 @@ function-aws-query:
 | `WebIdentity` | Assumes `webIdentity.roleARN` with a web identity token from a file (`tokenConfig.source: Filesystem`, `fsPath`) or from key `token` of the `aws-creds` block (`tokenConfig.source: Secret`) | only for a Secret token |
 
 `identity.assumeRoleChain` assumes further roles, in order, on top of any source.
+
+```yaml
+identity:
+  source: WebIdentity
+  webIdentity:
+    roleARN: arn:aws:iam::123456789012:role/rds-metrics-reader
+    tokenConfig:
+      source: Filesystem
+      fsPath: /var/run/secrets/upbound.io/provider/token
+```
+
+The region is always `region` from the input, or `us-east-1` without it. The
+`AWS_REGION` environment variable is not used, for any source.
 
 On Upbound control planes, `WebIdentity` with the Upbound OIDC token works without
 any secret: set the annotation

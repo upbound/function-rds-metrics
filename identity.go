@@ -33,8 +33,9 @@ func needsCredentialsBlock(in *v1beta1.Input) bool {
 	case v1beta1.IdentitySourceSecret:
 		return true
 	case v1beta1.IdentitySourceWebIdentity:
+		// Without webIdentity, buildAWSConfig reports the missing roleARN.
 		wi := in.Identity.WebIdentity
-		return wi == nil || wi.TokenConfig == nil || wi.TokenConfig.Source == "" || wi.TokenConfig.Source == "Secret"
+		return wi != nil && (wi.TokenConfig == nil || wi.TokenConfig.Source == "" || wi.TokenConfig.Source == "Secret")
 	case v1beta1.IdentitySourceIRSA, v1beta1.IdentitySourcePodIdentity:
 		return false
 	default:

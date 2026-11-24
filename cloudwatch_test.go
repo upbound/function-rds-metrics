@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/crossplane/function-sdk-go/logging"
 	fnv1 "github.com/crossplane/function-sdk-go/proto/v1"
@@ -104,8 +106,8 @@ func TestCloudWatchErrorReporting(t *testing.T) {
 		if !strings.Contains(c.GetMessage(), "2 of 2") || !strings.Contains(c.GetMessage(), "AccessDenied") {
 			t.Errorf("message = %q, want the failure count and the first error", c.GetMessage())
 		}
-		if len(warnings(rsp)) != 1 {
-			t.Errorf("warnings = %v, want one", warnings(rsp))
+		if len(warnings(rsp)) != 0 {
+			t.Errorf("warnings = %v, want none (the condition carries the message)", warnings(rsp))
 		}
 		if hasFatal(rsp) {
 			t.Error("CloudWatch errors must not stop the pipeline")
@@ -220,4 +222,19 @@ func (r recordingCloudWatch) GetMetricStatistics(_ context.Context, in *cloudwat
 		}
 	}
 	return &cloudwatch.GetMetricStatisticsOutput{}, nil
+}
+
+func TestCloudWatchErrorTextIsStable(t *testing.T) {
+	// What the SDK returns: an API error wrapped with a per-request ID.
+	apiErr := &smithy.GenericAPIError{Code: "AccessDenied", Message: "not authorized to perform cloudwatch:GetMetricStatistics"}
+	wrapped := fmt.Errorf("operation error CloudWatch: GetMetricStatistics, https response error StatusCode: 403, RequestID: 1234-abcd, %w", apiErr)
+
+	rsp := runWithFakeCloudWatch(t, fakeCloudWatch{errs: map[string]error{"CPUUtilization": wrapped, "FreeableMemory": wrapped}})
+	msg := functionSuccess(rsp).GetMessage()
+	if strings.Contains(msg, "RequestID") || strings.Contains(msg, "1234-abcd") {
+		t.Errorf("message %q contains the per-request ID", msg)
+	}
+	if !strings.Contains(msg, "AccessDenied: not authorized") {
+		t.Errorf("message %q, want the API error code and message", msg)
+	}
 }

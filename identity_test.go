@@ -13,10 +13,11 @@ func TestNeedsCredentialsBlock(t *testing.T) {
 		in   *v1beta1.Input
 		want bool
 	}{
-		"NoIdentityMeansSecret": {in: &v1beta1.Input{}, want: true},
-		"Secret":                {in: &v1beta1.Input{Identity: &v1beta1.Identity{Source: v1beta1.IdentitySourceSecret}}, want: true},
-		"IRSA":                  {in: &v1beta1.Input{Identity: &v1beta1.Identity{Source: v1beta1.IdentitySourceIRSA}}, want: false},
-		"PodIdentity":           {in: &v1beta1.Input{Identity: &v1beta1.Identity{Source: v1beta1.IdentitySourcePodIdentity}}, want: false},
+		"NoIdentityMeansSecret":    {in: &v1beta1.Input{}, want: true},
+		"Secret":                   {in: &v1beta1.Input{Identity: &v1beta1.Identity{Source: v1beta1.IdentitySourceSecret}}, want: true},
+		"IRSA":                     {in: &v1beta1.Input{Identity: &v1beta1.Identity{Source: v1beta1.IdentitySourceIRSA}}, want: false},
+		"PodIdentity":              {in: &v1beta1.Input{Identity: &v1beta1.Identity{Source: v1beta1.IdentitySourcePodIdentity}}, want: false},
+		"WebIdentityWithoutConfig": {in: &v1beta1.Input{Identity: &v1beta1.Identity{Source: v1beta1.IdentitySourceWebIdentity}}, want: false},
 		"WebIdentitySecretToken": {in: &v1beta1.Input{Identity: &v1beta1.Identity{
 			Source:      v1beta1.IdentitySourceWebIdentity,
 			WebIdentity: &v1beta1.WebIdentity{RoleARN: "arn:aws:iam::111:role/x"},
@@ -39,6 +40,12 @@ func TestNeedsCredentialsBlock(t *testing.T) {
 }
 
 func TestBuildAWSConfig(t *testing.T) {
+	// Don't let the developer's ~/.aws or AWS_* variables change the results.
+	t.Setenv("AWS_CONFIG_FILE", "/dev/null")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
 	direct := map[string][]byte{"access-key-id": []byte("AK"), "secret-access-key": []byte("SK"), "session-token": []byte("ST")}
 	iniCreds := map[string][]byte{"credentials": []byte("[default]\naws_access_key_id = IAK\naws_secret_access_key = ISK\n")}
 

@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/aws/smithy-go"
 	"github.com/upbound/function-rds-metrics/input/v1beta1"
 	"google.golang.org/protobuf/types/known/structpb"
 	"gopkg.in/ini.v1"
@@ -114,15 +115,15 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 	// call failed -> FunctionSuccess=False; some failed -> a warning. The
 	// pipeline continues either way, as before.
 	if len(fetchErrs) > 0 {
-		summary := fmt.Sprintf("%d of %d CloudWatch metric requests for RDS instance %s failed: %v",
+		summary := fmt.Sprintf("%d of %d CloudWatch metric requests for RDS instance %s failed: %s",
 			len(fetchErrs), requested, in.DatabaseName, fetchErrs[0])
-		response.Warning(rsp, errors.New(summary)).TargetCompositeAndClaim()
 		if len(fetchErrs) == requested {
 			response.ConditionFalse(rsp, "FunctionSuccess", "CloudWatchError").
 				WithMessage(summary).
 				TargetCompositeAndClaim()
 			return rsp, nil
 		}
+		response.Warning(rsp, errors.New(summary)).TargetCompositeAndClaim()
 	}
 
 	response.ConditionTrue(rsp, "FunctionSuccess", "Success").
@@ -549,7 +550,7 @@ func (f *Function) fetchRDSMetrics(ctx context.Context, client cloudWatchAPI, db
 		result, err := client.GetMetricStatistics(ctx, input)
 		if err != nil {
 			f.log.Info("Failed to fetch metric", "metric", metricName, "error", err)
-			fetchErrs = append(fetchErrs, errors.Wrapf(err, "metric %s", metricName))
+			fetchErrs = append(fetchErrs, errors.Errorf("metric %s: %s", metricName, stableErrorText(err)))
 			continue
 		}
 
@@ -754,4 +755,14 @@ func GetNestedKey(dataMap map[string]interface{}, key string) (string, bool) {
 		return str, true
 	}
 	return "", false
+}
+
+// stableErrorText returns an AWS error without its per-request details (request
+// ID), so condition messages and events don't change on every reconcile.
+func stableErrorText(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode() + ": " + apiErr.ErrorMessage()
+	}
+	return err.Error()
 }
