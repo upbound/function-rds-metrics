@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/upbound/function-rds-metrics/input/v1beta1"
 )
 
@@ -122,8 +124,8 @@ func TestBuildAWSConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.Credentials == nil {
-			t.Error("expected a web identity credentials provider")
+		if !aws.IsCredentialsProvider(cfg.Credentials, (*stscreds.WebIdentityRoleProvider)(nil)) {
+			t.Errorf("credentials provider = %T, want a web identity role provider", cfg.Credentials)
 		}
 	})
 
@@ -154,8 +156,8 @@ func TestBuildAWSConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if cfg.Credentials == nil {
-			t.Error("expected an assume-role credentials provider")
+		if !aws.IsCredentialsProvider(cfg.Credentials, (*stscreds.AssumeRoleProvider)(nil)) {
+			t.Errorf("credentials provider = %T, want an assume-role provider", cfg.Credentials)
 		}
 	})
 }
@@ -186,4 +188,29 @@ func TestWebIdentityTokenRetriever(t *testing.T) {
 			t.Error("expected error for an unsupported token source")
 		}
 	})
+}
+
+func TestRoleSessionName(t *testing.T) {
+	custom := "my-session"
+	webIdentity := func(wi *v1beta1.WebIdentity) string {
+		var o stscreds.WebIdentityRoleOptions
+		webIdentityRoleOptions(wi)(&o)
+		return o.RoleSessionName
+	}
+	assumeRole := func(r v1beta1.AssumeRole) string {
+		var o stscreds.AssumeRoleOptions
+		assumeRoleOptions(r)(&o)
+		return o.RoleSessionName
+	}
+	cases := map[string]struct{ got, want string }{
+		"WebIdentityDefault": {got: webIdentity(&v1beta1.WebIdentity{}), want: defaultRoleSessionName},
+		"WebIdentityCustom":  {got: webIdentity(&v1beta1.WebIdentity{RoleSessionName: custom}), want: custom},
+		"AssumeRoleDefault":  {got: assumeRole(v1beta1.AssumeRole{}), want: defaultRoleSessionName},
+		"AssumeRoleCustom":   {got: assumeRole(v1beta1.AssumeRole{RoleSessionName: &custom}), want: custom},
+	}
+	for name, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s: RoleSessionName = %q, want %q", name, tc.got, tc.want)
+		}
+	}
 }

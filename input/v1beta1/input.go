@@ -44,8 +44,8 @@ type Input struct {
 	Identity *Identity `json:"identity,omitempty"`
 }
 
-// Identity mirrors provider-upjet-aws spec.credentials + spec.assumeRoleChain,
-// and the identity input of function-aws-query.
+// Identity selects how the function gets AWS credentials. It matches the
+// identity input of function-aws-query.
 type Identity struct {
 	// Source of the base credentials.
 	// +kubebuilder:validation:Enum=Secret;IRSA;WebIdentity;PodIdentity
@@ -89,7 +89,7 @@ const (
 // WebIdentity configures the AssumeRoleWithWebIdentity flow.
 type WebIdentity struct {
 	// RoleARN is the IAM role to assume with the web identity token.
-	RoleARN string `json:"roleARN"` //nolint:tagliatelle // mirrors provider-upjet-aws field name
+	RoleARN string `json:"roleARN"` //nolint:tagliatelle // same field name as function-aws-query
 
 	// RoleSessionName is an optional session name for the assumed role.
 	// +optional
@@ -115,7 +115,7 @@ type TokenConfig struct {
 // AssumeRole describes a single STS AssumeRole hop.
 type AssumeRole struct {
 	// RoleARN is the role to assume.
-	RoleARN string `json:"roleARN"` //nolint:tagliatelle // mirrors provider-upjet-aws field name
+	RoleARN string `json:"roleARN"` //nolint:tagliatelle // same field name as function-aws-query
 
 	// ExternalID to pass to AssumeRole, if the role's trust policy requires it.
 	// +optional

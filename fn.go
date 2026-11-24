@@ -117,13 +117,15 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 	if len(fetchErrs) > 0 {
 		summary := fmt.Sprintf("%d of %d CloudWatch metric requests for RDS instance %s failed: %s",
 			len(fetchErrs), requested, in.DatabaseName, fetchErrs[0])
+		// Always warn: a later step can overwrite the condition (for example a
+		// second rds-metrics step that succeeds), and operations ignore conditions.
+		response.Warning(rsp, errors.New(summary)).TargetCompositeAndClaim()
 		if len(fetchErrs) == requested {
 			response.ConditionFalse(rsp, "FunctionSuccess", "CloudWatchError").
 				WithMessage(summary).
 				TargetCompositeAndClaim()
 			return rsp, nil
 		}
-		response.Warning(rsp, errors.New(summary)).TargetCompositeAndClaim()
 	}
 
 	response.ConditionTrue(rsp, "FunctionSuccess", "Success").

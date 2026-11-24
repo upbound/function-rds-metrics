@@ -17,6 +17,9 @@ import (
 // defaultRegion is used when the input sets no region.
 const defaultRegion = "us-east-1"
 
+// defaultRoleSessionName is the STS session name when the input sets none.
+const defaultRoleSessionName = "function-rds-metrics"
+
 // identitySource returns the configured credential source, Secret by default.
 func identitySource(in *v1beta1.Input) v1beta1.IdentitySource {
 	if in.Identity != nil && in.Identity.Source != "" {
@@ -84,11 +87,7 @@ func buildAWSConfig(ctx context.Context, creds map[string][]byte, in *v1beta1.In
 			return aws.Config{}, err
 		}
 		provider := stscreds.NewWebIdentityRoleProvider(sts.NewFromConfig(base), webIdentity.RoleARN, retriever,
-			func(o *stscreds.WebIdentityRoleOptions) {
-				if webIdentity.RoleSessionName != "" {
-					o.RoleSessionName = webIdentity.RoleSessionName
-				}
-			})
+			webIdentityRoleOptions(webIdentity))
 		opts = append(opts, config.WithCredentialsProvider(aws.NewCredentialsCache(provider)))
 	default:
 		return aws.Config{}, errors.Errorf("unsupported identity source: %s", source)
@@ -104,18 +103,37 @@ func buildAWSConfig(ctx context.Context, creds map[string][]byte, in *v1beta1.In
 		prev := cfg
 		role := r
 		cfg.Credentials = aws.NewCredentialsCache(stscreds.NewAssumeRoleProvider(sts.NewFromConfig(prev), role.RoleARN,
-			func(o *stscreds.AssumeRoleOptions) {
-				if role.ExternalID != nil {
-					o.ExternalID = role.ExternalID
-				}
-				if role.RoleSessionName != nil {
-					o.RoleSessionName = *role.RoleSessionName
-				}
-				o.Tags = toSTSTags(role.Tags)
-				o.TransitiveTagKeys = role.TransitiveTagKeys
-			}))
+			assumeRoleOptions(role)))
 	}
 	return cfg, nil
+}
+
+// webIdentityRoleOptions sets the session name: the configured one, or a fixed
+// default. The SDK's default is time-based, and the assumed-role ARN in AWS
+// errors includes it, so condition messages would change on every run.
+func webIdentityRoleOptions(wi *v1beta1.WebIdentity) func(*stscreds.WebIdentityRoleOptions) {
+	return func(o *stscreds.WebIdentityRoleOptions) {
+		o.RoleSessionName = defaultRoleSessionName
+		if wi.RoleSessionName != "" {
+			o.RoleSessionName = wi.RoleSessionName
+		}
+	}
+}
+
+// assumeRoleOptions configures one assumeRoleChain hop, with the same session
+// name default as webIdentityRoleOptions.
+func assumeRoleOptions(role v1beta1.AssumeRole) func(*stscreds.AssumeRoleOptions) {
+	return func(o *stscreds.AssumeRoleOptions) {
+		o.RoleSessionName = defaultRoleSessionName
+		if role.RoleSessionName != nil && *role.RoleSessionName != "" {
+			o.RoleSessionName = *role.RoleSessionName
+		}
+		if role.ExternalID != nil {
+			o.ExternalID = role.ExternalID
+		}
+		o.Tags = toSTSTags(role.Tags)
+		o.TransitiveTagKeys = role.TransitiveTagKeys
+	}
 }
 
 // parseStaticCredentials reads static credentials from the "aws-creds" block:

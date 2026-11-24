@@ -35,26 +35,33 @@ func (f fakeCloudWatch) GetMetricStatistics(_ context.Context, in *cloudwatch.Ge
 
 func runWithFakeCloudWatch(t *testing.T, cw fakeCloudWatch) *fnv1.RunFunctionResponse {
 	t.Helper()
-	f := &Function{
-		log:           logging.NewNopLogger(),
-		newCloudWatch: func(aws.Config) cloudWatchAPI { return cw },
-	}
-	req := &fnv1.RunFunctionRequest{
-		Meta: &fnv1.RequestMeta{Tag: "t"},
-		Input: resource.MustStructJSON(`{
+	return runWith(t, cw, `{
 			"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
 			"kind": "Input",
 			"databaseName": "test-db",
 			"region": "us-east-1",
 			"target": "status.rdsMetrics",
 			"metrics": ["CPUUtilization", "FreeableMemory"]
-		}`),
+		}`, map[string][]byte{"access-key-id": []byte("AK"), "secret-access-key": []byte("SK")})
+}
+
+// runWith runs the function with the given input and aws-creds data, against a
+// fake CloudWatch.
+func runWith(t *testing.T, cw fakeCloudWatch, input string, awsCreds map[string][]byte) *fnv1.RunFunctionResponse {
+	t.Helper()
+	f := &Function{
+		log:           logging.NewNopLogger(),
+		newCloudWatch: func(aws.Config) cloudWatchAPI { return cw },
+	}
+	req := &fnv1.RunFunctionRequest{
+		Meta:  &fnv1.RequestMeta{Tag: "t"},
+		Input: resource.MustStructJSON(input),
 		Observed: &fnv1.State{Composite: &fnv1.Resource{
 			Resource: resource.MustStructJSON(`{"apiVersion":"example.crossplane.io/v1","kind":"XR","metadata":{"name":"test-xr"}}`),
 		}},
 		Credentials: map[string]*fnv1.Credentials{
 			"aws-creds": {Source: &fnv1.Credentials_CredentialData{CredentialData: &fnv1.CredentialData{
-				Data: map[string][]byte{"access-key-id": []byte("AK"), "secret-access-key": []byte("SK")},
+				Data: awsCreds,
 			}}},
 		},
 	}
@@ -106,8 +113,9 @@ func TestCloudWatchErrorReporting(t *testing.T) {
 		if !strings.Contains(c.GetMessage(), "2 of 2") || !strings.Contains(c.GetMessage(), "AccessDenied") {
 			t.Errorf("message = %q, want the failure count and the first error", c.GetMessage())
 		}
-		if len(warnings(rsp)) != 0 {
-			t.Errorf("warnings = %v, want none (the condition carries the message)", warnings(rsp))
+		// A later step can overwrite the condition, so the warning is reported too.
+		if len(warnings(rsp)) != 1 {
+			t.Errorf("warnings = %v, want one", warnings(rsp))
 		}
 		if hasFatal(rsp) {
 			t.Error("CloudWatch errors must not stop the pipeline")
@@ -236,5 +244,25 @@ func TestCloudWatchErrorTextIsStable(t *testing.T) {
 	}
 	if !strings.Contains(msg, "AccessDenied: not authorized") {
 		t.Errorf("message %q, want the API error code and message", msg)
+	}
+}
+
+func TestWebIdentityTokenFromCredentialsBlock(t *testing.T) {
+	// WebIdentity with the token as the only key of aws-creds: no static keys
+	// needed, and the metrics run with the assumed role (CloudWatch is faked).
+	rsp := runWith(t, fakeCloudWatch{}, `{
+			"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
+			"kind": "Input",
+			"databaseName": "test-db",
+			"region": "us-east-1",
+			"target": "status.rdsMetrics",
+			"metrics": ["CPUUtilization"],
+			"identity": {"source": "WebIdentity", "webIdentity": {"roleARN": "arn:aws:iam::111:role/x"}}
+		}`, map[string][]byte{"token": []byte("tok")})
+	if hasFatal(rsp) {
+		t.Fatalf("unexpected fatal result: %v", rsp.GetResults())
+	}
+	if c := functionSuccess(rsp); c == nil || c.GetStatus() != fnv1.Status_STATUS_CONDITION_TRUE {
+		t.Errorf("FunctionSuccess = %v, want True", c)
 	}
 }

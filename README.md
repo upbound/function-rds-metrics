@@ -216,8 +216,7 @@ optionally `session-token`) directly.
 ### Identity sources
 
 Set `identity.source` in the input to use credentials without a long-lived key.
-It works like `spec.credentials` of provider-upjet-aws and the `identity` input of
-function-aws-query:
+It works like the `identity` input of function-aws-query:
 
 | Source | Credentials | `aws-creds` block |
 |---|---|---|
@@ -227,6 +226,7 @@ function-aws-query:
 | `WebIdentity` | Assumes `webIdentity.roleARN` with a web identity token from a file (`tokenConfig.source: Filesystem`, `fsPath`) or from key `token` of the `aws-creds` block (`tokenConfig.source: Secret`) | only for a Secret token |
 
 `identity.assumeRoleChain` assumes further roles, in order, on top of any source.
+Without `roleSessionName`, every role session is named `function-rds-metrics`.
 
 ```yaml
 identity:
