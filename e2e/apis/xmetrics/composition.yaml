@@ -1,0 +1,40 @@
+# Fetches CloudWatch metrics for the database named in the XR. The test uses a
+# name that doesn't exist: CloudWatch then returns no data points, but every
+# request still has to succeed, so the test covers sign-in, the role's
+# permission (cloudwatch:GetMetricStatistics) and the API call without an RDS
+# instance. The function signs in with WebIdentity and the Upbound OIDC token,
+# assuming the dedicated solutions-e2e-function role (trust: subject
+# mcp:solutions/*:function:*). If every request fails, the function sets
+# FunctionSuccess=False on the XR, and the test fails.
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xmetrics.e2e.rds-metrics.upbound.io
+spec:
+  compositeTypeRef:
+    apiVersion: e2e.rds-metrics.upbound.io/v1alpha1
+    kind: XMetrics
+  mode: Pipeline
+  pipeline:
+  - step: rds-metrics
+    functionRef:
+      name: solutions-function-rds-metrics
+    input:
+      apiVersion: rdsmetrics.fn.crossplane.io/v1beta1
+      kind: Input
+      databaseNameRef: xr.spec.databaseName
+      region: eu-central-1
+      metrics:
+      - CPUUtilization
+      - FreeableMemory
+      target: status.rdsMetrics
+      identity:
+        source: WebIdentity
+        webIdentity:
+          roleARN: arn:aws:iam::609897127049:role/solutions-e2e-function
+          tokenConfig:
+            source: Filesystem
+            fsPath: /var/run/secrets/upbound.io/provider/token
+  - step: auto-ready
+    functionRef:
+      name: crossplane-contrib-function-auto-ready

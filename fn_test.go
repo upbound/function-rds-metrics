@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/protobuf/testing/protocmp"
@@ -277,7 +278,11 @@ aws_secret_access_key = test-secret-key`),
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			f := &Function{log: logging.NewNopLogger()}
+			f := &Function{
+				log: logging.NewNopLogger(),
+				// No real CloudWatch calls from unit tests.
+				newCloudWatch: func(aws.Config) cloudWatchAPI { return fakeCloudWatch{} },
+			}
 			rsp, err := f.RunFunction(tc.args.ctx, tc.args.req)
 
 			// For tests that expect AWS failures, we mainly want to verify context population behavior

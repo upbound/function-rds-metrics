@@ -1,0 +1,45 @@
+# End-to-end test for function-rds-metrics. `up test run tests/* --e2e` spins up
+# a throwaway Spaces control plane, installs this project (the XRD and
+# Composition in apis/, plus the function under test as a dependency), creates
+# the XR and waits for both conditions. The function creates no resources, so
+# Ready alone would pass even when CloudWatch fails: FunctionSuccess is the
+# condition that proves the metric requests succeeded.
+apiVersion: meta.dev.upbound.io/v1alpha1
+kind: E2ETest
+metadata:
+  name: e2e-rds-metrics
+spec:
+  crossplane:
+    autoUpgrade:
+      channel: Rapid
+  defaultConditions:
+    - Ready
+    - FunctionSuccess
+  initResources:
+    # Patch the control plane's default DeploymentRuntimeConfig before the
+    # functions install, so every function pod gets an Upbound OIDC token with
+    # the AWS STS audience, mounted at /var/run/secrets/upbound.io/provider/token
+    # (function pods too). Spaces policy only allows the audience annotation
+    # here; Upbound assigns the workload identity itself.
+    - apiVersion: pkg.crossplane.io/v1beta1
+      kind: DeploymentRuntimeConfig
+      metadata:
+        name: default
+      spec:
+        deploymentTemplate:
+          spec:
+            selector: {}
+            template:
+              metadata:
+                annotations:
+                  proidc.cloud-spaces.upbound.io/audience: sts.amazonaws.com
+  manifests:
+    - apiVersion: e2e.rds-metrics.upbound.io/v1alpha1
+      kind: XMetrics
+      metadata:
+        name: e2e-metrics
+        namespace: default
+      spec:
+        databaseName: e2e-no-such-instance
+  skipDelete: false
+  timeoutSeconds: 900
