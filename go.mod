@@ -2,6 +2,8 @@ module github.com/upbound/function-rds-metrics
 
 go 1.25.5
 
+toolchain go1.26.11
+
 require (
 	github.com/alecthomas/kong v1.13.0
 	github.com/aws/aws-sdk-go-v2 v1.41.5
