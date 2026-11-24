@@ -173,3 +173,51 @@ func TestNoCredentialsBlockNeededForIRSA(t *testing.T) {
 		t.Errorf("FunctionSuccess = %v, want True", c)
 	}
 }
+
+func TestDatabaseNameRefFromXRSpec(t *testing.T) {
+	var gotDB string
+	f := &Function{
+		log: logging.NewNopLogger(),
+		newCloudWatch: func(aws.Config) cloudWatchAPI {
+			return recordingCloudWatch{db: &gotDB}
+		},
+	}
+	// As on the first pipeline step: the observed XR has the spec, the desired
+	// XR is empty.
+	req := &fnv1.RunFunctionRequest{
+		Meta: &fnv1.RequestMeta{Tag: "t"},
+		Input: resource.MustStructJSON(`{
+			"apiVersion": "rdsmetrics.fn.crossplane.io/v1beta1",
+			"kind": "Input",
+			"databaseNameRef": "xr.spec.databaseName",
+			"target": "context.metricsResult",
+			"metrics": ["CPUUtilization"],
+			"identity": {"source": "IRSA"}
+		}`),
+		Observed: &fnv1.State{Composite: &fnv1.Resource{
+			Resource: resource.MustStructJSON(`{"apiVersion":"example.crossplane.io/v1","kind":"XR","metadata":{"name":"test-xr"},"spec":{"databaseName":"orders-db"}}`),
+		}},
+	}
+	rsp, err := f.RunFunction(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunFunction returned error: %v", err)
+	}
+	if hasFatal(rsp) {
+		t.Fatalf("unexpected fatal result: %v", rsp.GetResults())
+	}
+	if gotDB != "orders-db" {
+		t.Errorf("queried database %q, want orders-db", gotDB)
+	}
+}
+
+// recordingCloudWatch records the DBInstanceIdentifier it was asked about.
+type recordingCloudWatch struct{ db *string }
+
+func (r recordingCloudWatch) GetMetricStatistics(_ context.Context, in *cloudwatch.GetMetricStatisticsInput, _ ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricStatisticsOutput, error) {
+	for _, d := range in.Dimensions {
+		if aws.ToString(d.Name) == "DBInstanceIdentifier" {
+			*r.db = aws.ToString(d.Value)
+		}
+	}
+	return &cloudwatch.GetMetricStatisticsOutput{}, nil
+}

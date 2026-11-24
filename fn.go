@@ -681,15 +681,17 @@ func (f *Function) resolveStringFromXRMetadata(req *fnv1.RunFunctionRequest, xrF
 	}
 }
 
-// resolveStringFromXRSpec resolves a string value from XR spec
+// resolveStringFromXRSpec resolves a string value from XR spec. The spec is the
+// user's input, so it is read from the observed XR: the desired XR has no spec
+// unless an earlier pipeline step set one.
 func (f *Function) resolveStringFromXRSpec(req *fnv1.RunFunctionRequest, xrField, refKey string) (string, error) {
-	_, dxr, err := f.getXRAndStatus(req)
+	oxr, err := request.GetObservedCompositeResource(req)
 	if err != nil {
-		return "", errors.Wrap(err, "cannot get XR")
+		return "", errors.Wrap(err, "cannot get observed composite resource")
 	}
 
 	xrSpec := make(map[string]interface{})
-	err = dxr.Resource.GetValueInto("spec", &xrSpec)
+	err = oxr.Resource.GetValueInto("spec", &xrSpec)
 	if err != nil {
 		return "", errors.Wrap(err, "cannot get XR spec")
 	}
